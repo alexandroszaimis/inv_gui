@@ -200,21 +200,22 @@ LOG_TABLE_VARIABLES = [
     "Iq_ref",         # 3
     "Id",             # 4
     "Iq",             # 5
-    "psi_ref",        # 6
-    "trq_ref",        # 7
-    "trq_actual",     # 8
-    "psi_actual",     # 9
-    "psi_ref",        # 10 (duplicate)
-    "trq_ref",        # 11 (duplicate)
-    "trq_actual",     # 12 (duplicate)
-    "sector",         # 13
-    "vector",         # 14
-    "Ia_ph",          # 15
-    "Ib_ph",          # 16
-    "pwr_ref",        # 17
-    "pwr_actual",     # 18
-    "motor_rpm",      # 19
-    "Vdc",            # 20
+    "foc_psi_ref",        # 6
+    "foc_trq_ref",        # 7
+    "trq_actual", 
+    "foc_psi_actual", 
+    "dtc_psi_ref",       
+    "dtc_trq_ref",      
+    "dtc_psi_actual",  
+    "dtc_trq_actual",    
+    "dtc_sector",        
+    "dtc_vector",        
+    "Ia_ph",         
+    "Ib_ph",         
+    "pwr_ref",       
+    "pwr_actual",    
+    "motor_rpm",     
+    "Vdc",           
 ]
 
 # DIAG fields (name, type). Keep aligned with firmware order.
@@ -452,15 +453,44 @@ class DataLoggerQt:
         return u - 0x10000 if u >= 0x8000 else u
 
     def _mult(self, i: int) -> float:
+        # Try to use log_scales from MCU settings
+        if hasattr(self.app, "_recv_values") and self.app._recv_values:
+            scales_values = self.app._recv_values.get("log_scales[100]")
+            slot_values = self.app._recv_values.get("log_slot[LOG_N_CHANNELS]")
+            
+            if isinstance(scales_values, list) and isinstance(slot_values, list):
+                # Get slot index for channel i
+                if i < len(slot_values):
+                    slot_idx = int(slot_values[i])
+                    # Use log_scales[slot_idx] as the multiplier
+                    if 0 <= slot_idx < len(scales_values):
+                        m = scales_values[slot_idx]
+                        return float(m) if m not in (0, 0.0) else 1.0
+        
+        # Fallback to CHANNEL_MULTIPLIERS if log_scales not available
         if i < len(self.CHANNEL_MULTIPLIERS):
             m = self.CHANNEL_MULTIPLIERS[i]
             return float(m) if m not in (0, 0.0) else 1.0
         return 1.0
 
     def _decode_ch_num(self, i: int, u16_val: int) -> float:
+        # Check if this is a time channel (TIME_16US or TIME_16MS) - keep unsigned
+        is_time_channel = False
+        if hasattr(self.app, "_recv_values") and self.app._recv_values:
+            slot_values = self.app._recv_values.get("log_slot[LOG_N_CHANNELS]")
+            if isinstance(slot_values, list) and i < len(slot_values):
+                slot_idx = int(slot_values[i])
+                if 0 <= slot_idx < len(LOG_TABLE_VARIABLES):
+                    var_name = LOG_TABLE_VARIABLES[slot_idx]
+                    if var_name in ("TIME_16US", "TIME_16MS"):
+                        is_time_channel = True
+        
         if not self.SCALE_FLOATS:
             return float(int(u16_val))
         if i == 0 and not self.SCALE_CH1:
+            return float(int(u16_val))
+        # Time channels should remain unsigned
+        if is_time_channel:
             return float(int(u16_val))
         s16 = self._u16_to_s16(int(u16_val))
         return (s16 << self.SHIFT_BITS) / self._mult(i)
@@ -583,26 +613,54 @@ class DataLoggerQt:
         if not (self.bin_path and os.path.isfile(self.bin_path)):
             raise RuntimeError("BIN not found for CSV build")
 
+        # Get log_channels value from MCU (number of channels to write)
+        log_channels = self.NC  # default fallback to self.NC
+        if hasattr(self.app, "_recv_values") and self.app._recv_values:
+            log_channels_val = self.app._recv_values.get("log_channels")
+            if log_channels_val is not None:
+                log_channels = int(log_channels_val)
+
+        # Get log_slot array to map channel indices to variable names
+        log_slot_array = []
+        if hasattr(self.app, "_recv_values") and self.app._recv_values:
+            slot_values = self.app._recv_values.get("log_slot[LOG_N_CHANNELS]")
+            if isinstance(slot_values, list):
+                log_slot_array = slot_values
+
+        # Build channel header names from log_slot mapping
+        channel_names = []
+        for i in range(log_channels):
+            if i < len(log_slot_array):
+                slot_idx = int(log_slot_array[i])
+                if 0 <= slot_idx < len(LOG_TABLE_VARIABLES):
+                    channel_names.append(LOG_TABLE_VARIABLES[slot_idx])
+                else:
+                    channel_names.append(f"CH{i+1}")  # fallback if invalid index
+            else:
+                channel_names.append(f"CH{i+1}")  # fallback if no slot data
+
         # side panel strings and padding
         side_lines = self._settings_sidepanel_lines()
-        pad_along = "," * max(0, (self.COL_P - 1 - self.NC))
+        pad_along = "," * max(0, (self.COL_P - 1 - log_channels))
 
         # robust stream decode (fixes the 'line 1000' drift):
+        # The MCU sends log_channels uint16 values per sample, not LOG_N_CHANNELS
         raw = np.fromfile(self.bin_path, dtype="<u2")
-        usable = (raw.size // self.NC) * self.NC
+        usable = (raw.size // log_channels) * log_channels
         if usable != raw.size:
             raw = raw[:usable]
-        arr = raw.reshape(-1, self.NC)
+        arr = raw.reshape(-1, log_channels)
 
         with open(self.csv_path, "w", encoding="utf-8", newline="") as fc:
-            # header
-            fc.write(",".join([f"CH{i+1}" for i in range(self.NC)]) + pad_along + ",#SETTINGS,\n")
+            # header - use variable names instead of CH1, CH2, etc.
+            fc.write(",".join(channel_names) + pad_along + ",#SETTINGS,\n")
 
             side_idx = 0
             # write rows
             for k in range(arr.shape[0]):
                 row_u16 = arr[k]
-                fields = [f"{self._decode_ch_num(i, int(row_u16[i])):.9g}" for i in range(self.NC)]
+                # Only write the first log_channels columns
+                fields = [f"{self._decode_ch_num(i, int(row_u16[i])):.9g}" for i in range(log_channels)]
                 if side_idx < len(side_lines):
                     fc.write(",".join(fields) + pad_along + "," + side_lines[side_idx] + "\n")
                     side_idx += 1
@@ -914,32 +972,71 @@ class TwoWindowPlot(QtWidgets.QWidget):
         self.plot2.showGrid(x=True, y=True)
 
     def plot_csv(self, csv_path: str, groups1, groups2, titles1=None, titles2=None, link_x=True):
-        # Load only CH* columns, tolerate ragged rows
+        # Load channel columns dynamically (variable names or CH* columns)
         try:
-            df = pd.read_csv(
+            # Read full CSV first
+            df_full = pd.read_csv(
                 csv_path,
                 engine="python",
-                on_bad_lines="skip",
-                usecols=lambda c: str(c).startswith("CH")
+                on_bad_lines="skip"
             )
+            
+            # Identify channel columns: exclude metadata columns (starting with "#"), empty columns, and unnamed columns
+            channel_cols = [col for col in df_full.columns 
+                           if col and not str(col).startswith("#") 
+                           and not str(col).strip() == ""
+                           and not str(col).startswith("Unnamed")]
+            
+            if not channel_cols:
+                raise ValueError("No channel columns found in CSV.")
+            
+            # Extract only channel columns
+            df = df_full[channel_cols]
         except Exception:
-            cols = [f"CH{i}" for i in range(1, 13)]
+            # Fallback: manual parsing
+            with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
+                header_line = f.readline()
+                header_cols = [col.strip() for col in header_line.split(",")]
+            
+            # Find all channel column indices (exclude metadata columns starting with "#")
+            ch_indices = []
+            ch_names = []
+            for i, col in enumerate(header_cols):
+                if col and not col.startswith("#") and col.strip():
+                    ch_indices.append(i)
+                    ch_names.append(col)
+            
+            if not ch_indices:
+                raise ValueError("No channel columns found in CSV.")
+            
+            # Read data rows
             data = []
             with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
-                _ = f.readline()
+                _ = f.readline()  # skip header
                 for line in f:
                     parts = [p.strip() for p in line.split(",")]
                     row = []
-                    for p in parts[:12]:
-                        try: row.append(float(p))
-                        except: row.append(np.nan)
+                    for idx in ch_indices:
+                        if idx < len(parts):
+                            try:
+                                row.append(float(parts[idx]))
+                            except:
+                                row.append(np.nan)
+                        else:
+                            row.append(np.nan)
                     if any(np.isfinite(row)):
                         data.append(row)
-            df = pd.DataFrame(data, columns=cols)
+            df = pd.DataFrame(data, columns=ch_names)
 
-        df = df.apply(pd.to_numeric, errors="coerce").dropna(how="any")
-        if not any(col.startswith("CH") for col in df.columns):
-            raise ValueError("No CH* columns found in CSV.")
+        # Convert to numeric, coercing errors to NaN
+        df = df.apply(pd.to_numeric, errors="coerce")
+        
+        # Filter out rows where all channel values are NaN (metadata rows, empty rows, etc.)
+        # Keep rows that have at least one valid numeric value
+        df = df.dropna(how="all")
+        
+        if df.empty or len(df.columns) == 0:
+            raise ValueError("No valid channel data found in CSV.")
 
         # (A) Configure groups/curves first
         self.set_groups(groups1, groups2, titles1, titles2, link_x)
@@ -1079,19 +1176,6 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_conn = QtWidgets.QToolButton(); btn_conn.setText("Connect / Reconnect")
         btn_conn.clicked.connect(self._user_connect)
         tb.addWidget(btn_conn)
-
-        tb.addSeparator()
-
-        tb.addWidget(QtWidgets.QLabel("View:"))
-        self.view_combo = QtWidgets.QComboBox()
-        self._refresh_csv_list()
-        tb.addWidget(self.view_combo)
-        btn_view_refresh = QtWidgets.QToolButton(); btn_view_refresh.setText("⟳")
-        btn_view_refresh.clicked.connect(self._refresh_csv_list)
-        tb.addWidget(btn_view_refresh)
-        btn_view_open = QtWidgets.QToolButton(); btn_view_open.setText("VIEW DATA")
-        btn_view_open.clicked.connect(self._open_csv_in_graph_tab)
-        tb.addWidget(btn_view_open)
 
         self.options_btn = QtWidgets.QToolButton()
         self.options_btn.setToolTip("Options")
@@ -1269,6 +1353,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 grid.addWidget(recv, r, basec + 2)
             else:
                 e = QtWidgets.QLineEdit(); e.setFixedWidth(110); self.send_vars[name] = e
+                # Connect Fs_trq changes to log baudrate update
+                if name == "Fs_trq":
+                    e.textChanged.connect(self._update_log_baudrate)
                 grid.addWidget(e, r, basec + 1)
                 rv = QtWidgets.QLabel("—"); self.recv_vars[name] = rv
                 grid.addWidget(rv, r, basec + 2)
@@ -1310,13 +1397,16 @@ class MainWindow(QtWidgets.QMainWindow):
         
         row = 0
         for name, typ, unit in LOG_FIELDS:
-            if name in ("log_scales[100]", "log_slot[LOG_N_CHANNELS]", "log_channels"):
-                continue  # Handle arrays and log_channels separately
+            if name in ("log_scales[100]", "log_slot[LOG_N_CHANNELS]", "log_channels", "params_init_key"):
+                continue  # Handle arrays, log_channels, and params_init_key separately
             
             grid.addWidget(QtWidgets.QLabel(name), row, 0)
             e = QtWidgets.QLineEdit()
             e.setFixedWidth(110)
             self.log_send_vars[name] = e
+            # Connect data_logger_ts_div changes to baudrate update
+            if name == "data_logger_ts_div":
+                e.textChanged.connect(self._update_log_baudrate)
             grid.addWidget(e, row, 1)
             rv = QtWidgets.QLabel("—")
             self.log_recv_vars[name] = rv
@@ -1325,6 +1415,20 @@ class MainWindow(QtWidgets.QMainWindow):
             row += 1
         
         inner_layout.addLayout(grid)
+        
+        # Baudrate calculation display
+        baudrate_layout = QtWidgets.QHBoxLayout()
+        baudrate_layout.addWidget(QtWidgets.QLabel("Required Baudrate:"))
+        self.log_baudrate_label = QtWidgets.QLabel("—")
+        self.log_baudrate_label.setStyleSheet("font-weight: bold; color: #0066cc;")
+        baudrate_layout.addWidget(self.log_baudrate_label)
+        baudrate_layout.addWidget(QtWidgets.QLabel("Mbps"))
+        # Warning label for high baudrate
+        self.log_baudrate_warning = QtWidgets.QLabel("")
+        self.log_baudrate_warning.setStyleSheet("color: red; font-weight: bold;")
+        baudrate_layout.addWidget(self.log_baudrate_warning)
+        baudrate_layout.addStretch()
+        inner_layout.addLayout(baudrate_layout)
         
         # Separator
         inner_layout.addWidget(QtWidgets.QLabel(""))
@@ -1346,6 +1450,8 @@ class MainWindow(QtWidgets.QMainWindow):
             num_ch = self.log_channel_combo.currentData()
             if num_ch is not None:
                 self._recv_values["log_channels"] = num_ch
+            # Update baudrate calculation
+            self._update_log_baudrate()
         
         self.log_channel_combo.currentIndexChanged.connect(on_channel_count_changed)
         channel_layout.addWidget(self.log_channel_combo)
@@ -1372,6 +1478,20 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def _on_log_channels_changed(self, index):
         """Update log slot inputs when channel count changes."""
+        # Save current selections before clearing widgets
+        saved_selections = {}
+        saved_scales = {}
+        if hasattr(self, 'log_send_vars'):
+            for i in range(len(self.log_slot_widgets)):
+                slot_name = f"log_slot[{i}]"
+                scale_key = f"scale_{i}"
+                slot_widget = self.log_send_vars.get(slot_name)
+                scale_widget = self.log_scales_widgets.get(scale_key) if hasattr(self, 'log_scales_widgets') else None
+                if isinstance(slot_widget, QtWidgets.QComboBox):
+                    saved_selections[i] = slot_widget.currentData()
+                if isinstance(scale_widget, QtWidgets.QLineEdit):
+                    saved_scales[i] = scale_widget.text()
+        
         # Clear existing slot widgets and scale widgets
         for widgets in self.log_slot_widgets:
             for w in widgets:
@@ -1435,11 +1555,32 @@ class MainWindow(QtWidgets.QMainWindow):
             
             # Connect handler after widgets are stored
             send_combo.currentIndexChanged.connect(make_slot_changed_handler(i, send_combo))
-            # Set initial scale label based on default selection (index 0 = TIME_16US)
-            initial_slot_idx = send_combo.currentData() if send_combo.count() > 0 else 0
+            # Restore saved selection if available, otherwise use default
+            if i in saved_selections and saved_selections[i] is not None:
+                # Find the index in the combo that matches the saved data value
+                # Block signals to prevent dropdown from popping up
+                send_combo.blockSignals(True)
+                saved_data = saved_selections[i]
+                for idx in range(send_combo.count()):
+                    if send_combo.itemData(idx) == saved_data:
+                        send_combo.setCurrentIndex(idx)
+                        initial_slot_idx = saved_data
+                        break
+                else:
+                    # If saved value not found, use default
+                    initial_slot_idx = send_combo.currentData() if send_combo.count() > 0 else 0
+                send_combo.blockSignals(False)
+            else:
+                # Set initial scale label based on default selection (index 0 = TIME_16US)
+                initial_slot_idx = send_combo.currentData() if send_combo.count() > 0 else 0
+            
             if initial_slot_idx is not None:
                 scale_label.setText(f"log_scale[{initial_slot_idx}]:")
                 self._update_mcu_scale_display(i, initial_slot_idx)
+            
+            # Restore saved scale value if available
+            if i in saved_scales:
+                scale_edit.setText(saved_scales[i])
             
             self.log_slots_layout.addWidget(label, i, 0)
             self.log_slots_layout.addWidget(send_combo, i, 1)
@@ -1582,20 +1723,24 @@ class MainWindow(QtWidgets.QMainWindow):
                     p += struct.pack(LE + "B", int(val) & 0xFF)
                 # Check if it's a log field
                 elif name in [f[0] for f in LOG_FIELDS if not is_array_field(f[0])]:
-                    w = getattr(self, 'log_send_vars', {}).get(name)
-                    s = w.text().strip() if isinstance(w, QtWidgets.QLineEdit) else "0"
-                    try:
-                        if   typ == "u8":  p += struct.pack(LE + "B", int(s) & 0xFF)
-                        elif typ == "u16": p += struct.pack(LE + "H", int(s) & 0xFFFF)
-                        elif typ == "u32": p += struct.pack(LE + "I", int(s) & 0xFFFFFFFF)
-                        elif typ == "i32": p += struct.pack(LE + "i", int(s))
-                        elif typ == "f32": p += struct.pack(LE + "f", float(s))
-                    except Exception:
-                        if   typ == "u8":  p += struct.pack(LE + "B", 0)
-                        elif typ == "u16": p += struct.pack(LE + "H", 0)
-                        elif typ == "u32": p += struct.pack(LE + "I", 0)
-                        elif typ == "i32": p += struct.pack(LE + "i", 0)
-                        elif typ == "f32": p += struct.pack(LE + "f", 0.0)
+                    # Special handling for params_init_key - always set to 1122867
+                    if name == "params_init_key":
+                        p += struct.pack(LE + "I", 1122867 & 0xFFFFFFFF)
+                    else:
+                        w = getattr(self, 'log_send_vars', {}).get(name)
+                        s = w.text().strip() if isinstance(w, QtWidgets.QLineEdit) else "0"
+                        try:
+                            if   typ == "u8":  p += struct.pack(LE + "B", int(s) & 0xFF)
+                            elif typ == "u16": p += struct.pack(LE + "H", int(s) & 0xFFFF)
+                            elif typ == "u32": p += struct.pack(LE + "I", int(s) & 0xFFFFFFFF)
+                            elif typ == "i32": p += struct.pack(LE + "i", int(s))
+                            elif typ == "f32": p += struct.pack(LE + "f", float(s))
+                        except Exception:
+                            if   typ == "u8":  p += struct.pack(LE + "B", 0)
+                            elif typ == "u16": p += struct.pack(LE + "H", 0)
+                            elif typ == "u32": p += struct.pack(LE + "I", 0)
+                            elif typ == "i32": p += struct.pack(LE + "i", 0)
+                            elif typ == "f32": p += struct.pack(LE + "f", 0.0)
                 else:
                     w = self.send_vars.get(name)
                     s = w.text().strip() if isinstance(w, QtWidgets.QLineEdit) else "0"
@@ -1643,8 +1788,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         e.setText(str(val))
             # Load log fields (non-array)
             for (name, typ, unit) in LOG_FIELDS:
-                if is_array_field(name) or name == "log_channels":
-                    continue  # Arrays and log_channels handled separately
+                if is_array_field(name) or name == "log_channels" or name == "params_init_key":
+                    continue  # Arrays, log_channels, and params_init_key handled separately
                 if name not in settings: continue
                 val = settings[name]
                 e = getattr(self, 'log_send_vars', {}).get(name)
@@ -1668,10 +1813,13 @@ class MainWindow(QtWidgets.QMainWindow):
                         slot_val = int(val)
                         if isinstance(w, QtWidgets.QComboBox):
                             # Find the item with matching data value
+                            # Block signals to prevent dropdown from popping up
+                            w.blockSignals(True)
                             for j in range(w.count()):
                                 if w.itemData(j) == slot_val:
                                     w.setCurrentIndex(j)
                                     break
+                            w.blockSignals(False)
                         elif isinstance(w, QtWidgets.QLineEdit):
                             w.setText(str(slot_val))
             # Load log scales if present
@@ -1709,8 +1857,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 settings_dict[name] = val
             # Save log fields (non-array)
             for (name, typ, unit) in LOG_FIELDS:
-                if is_array_field(name) or name == "log_channels":
-                    continue  # Arrays and log_channels handled separately
+                if is_array_field(name) or name == "log_channels" or name == "params_init_key":
+                    continue  # Arrays, log_channels, and params_init_key handled separately
                 e = getattr(self, 'log_send_vars', {}).get(name)
                 if isinstance(e, QtWidgets.QLineEdit):
                     val = e.text().strip() or "0"
@@ -1845,7 +1993,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 mcu_label = getattr(self, 'log_channels_mcu_label', None)
                 if mcu_label:
                     mcu_label.setText(str(log_channels_val))
+                # Update baudrate calculation
+                self._update_log_baudrate()
             elif name in [f[0] for f in LOG_FIELDS if not is_array_field(f[0])]:
+                # Skip params_init_key - it's not displayed
+                if name == "params_init_key":
+                    continue
                 # Other log fields
                 rv = getattr(self, 'log_recv_vars', {}).get(name)
                 if rv:
@@ -1853,6 +2006,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         rv.setText(f"{val:.6f}".rstrip("0").rstrip("."))
                     else:
                         rv.setText(str(val))
+                # Update baudrate if data_logger_ts_div changed
+                if name == "data_logger_ts_div":
+                    self._update_log_baudrate()
             else:
                 rv = self.recv_vars.get(name)
                 if rv:
@@ -1860,11 +2016,16 @@ class MainWindow(QtWidgets.QMainWindow):
                         rv.setText(f"{val:.6f}".rstrip("0").rstrip("."))
                     else:
                         rv.setText(str(val))
+                # Update baudrate if Fs_trq changed
+                if name == "Fs_trq":
+                    self._update_log_baudrate()
         
         # Update log slot displays after all fields are processed
         self._update_log_slots_from_recv()
         # Update log scales after slots are set
         self._update_log_scales_from_recv()
+        # Update baudrate calculation after all settings are loaded
+        self._update_log_baudrate()
     
     def _update_mcu_scale_display(self, channel_idx, slot_idx):
         """Update MCU scale display for a specific channel."""
@@ -1881,6 +2042,82 @@ class MainWindow(QtWidgets.QMainWindow):
             if scale_recv_label:
                 scale_val = scales_values[slot_idx]
                 scale_recv_label.setText(f"{scale_val:.6f}".rstrip("0").rstrip("."))
+    
+    def _update_log_baudrate(self):
+        """Calculate and update the required baudrate for data logging."""
+        try:
+            # Get number of channels
+            num_channels = 1  # default
+            if hasattr(self, 'log_channel_combo'):
+                num_ch = self.log_channel_combo.currentData()
+                if num_ch is not None:
+                    num_channels = num_ch
+            
+            # Get data_logger_ts_div (prefer send field, fallback to received value)
+            ts_div = None
+            if "data_logger_ts_div" in self.log_send_vars:
+                ts_div_str = self.log_send_vars["data_logger_ts_div"].text().strip()
+                if ts_div_str:
+                    try:
+                        ts_div = float(ts_div_str)
+                    except ValueError:
+                        pass
+            # Fallback to received value if send field is empty
+            if ts_div is None and hasattr(self, '_recv_values'):
+                ts_div_val = self._recv_values.get("data_logger_ts_div")
+                if ts_div_val is not None:
+                    try:
+                        ts_div = float(ts_div_val)
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Get Fs_trq (prefer send field, fallback to received value)
+            fs_trq = None
+            if "Fs_trq" in self.send_vars:
+                fs_trq_str = self.send_vars["Fs_trq"].text().strip()
+                if fs_trq_str:
+                    try:
+                        fs_trq = float(fs_trq_str)
+                    except ValueError:
+                        pass
+            # Fallback to received value if send field is empty
+            if fs_trq is None and hasattr(self, '_recv_values'):
+                fs_trq_val = self._recv_values.get("Fs_trq")
+                if fs_trq_val is not None:
+                    try:
+                        fs_trq = float(fs_trq_val)
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Calculate baudrate: num_channels * sizeof(uint16_t) * Fs_trq / data_logger_ts_div
+            # sizeof(uint16_t) = 2 bytes
+            # Fs_trq is in KHz, convert to Hz: Fs_trq * 1000
+            # Result in bytes per second, then convert to bits per second: * 8
+            if ts_div is not None and ts_div > 0 and fs_trq is not None and fs_trq > 0:
+                # Formula: num_channels * 2 bytes * Fs_trq(KHz) * 1000 / ts_div = bytes/sec
+                bytes_per_sec = num_channels * 2 * fs_trq * 1000 / ts_div
+                # Convert to bits per second, then to Mbps
+                baudrate_bps = bytes_per_sec * 8
+                baudrate_mbps = baudrate_bps / 1_000_000
+                self.log_baudrate_label.setText(f"{baudrate_mbps:.3f}")
+                
+                # Check if baudrate is too high (> 10 Mbps)
+                if baudrate_mbps > 10.0:
+                    # Change color to red and show warning
+                    self.log_baudrate_label.setStyleSheet("font-weight: bold; color: red;")
+                    self.log_baudrate_warning.setText("⚠ Baudrate too high!")
+                else:
+                    # Normal color (blue)
+                    self.log_baudrate_label.setStyleSheet("font-weight: bold; color: #0066cc;")
+                    self.log_baudrate_warning.setText("")
+            else:
+                self.log_baudrate_label.setText("—")
+                self.log_baudrate_label.setStyleSheet("font-weight: bold; color: #0066cc;")
+                self.log_baudrate_warning.setText("")
+        except Exception:
+            self.log_baudrate_label.setText("—")
+            self.log_baudrate_label.setStyleSheet("font-weight: bold; color: #0066cc;")
+            self.log_baudrate_warning.setText("")
     
     def _update_log_scales_from_recv(self):
         """Update per-channel log scale inputs from received values."""
@@ -1934,12 +2171,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.log_channel_combo.addItem(str(i), i)
             
             # Set current selection to received num_channels value
+            # Block signals to prevent dropdown from popping up
+            self.log_channel_combo.blockSignals(True)
             for i in range(self.log_channel_combo.count()):
                 if self.log_channel_combo.itemData(i) == num_channels:
                     self.log_channel_combo.setCurrentIndex(i)
                     break
+            self.log_channel_combo.blockSignals(False)
             
-            # Trigger slot widget update
+            # Trigger slot widget update manually (since we blocked signals)
             self._on_log_channels_changed(self.log_channel_combo.currentIndex())
         else:
             # If log_channels is 0 or invalid, keep default range but don't select anything
@@ -1971,16 +2211,19 @@ class MainWindow(QtWidgets.QMainWindow):
             # Update QComboBox if it's a dropdown
             if send_w and isinstance(send_w, QtWidgets.QComboBox):
                 # Find the item with matching data value
+                # Block signals to prevent dropdown from popping up
+                send_w.blockSignals(True)
                 for j in range(send_w.count()):
                     if send_w.itemData(j) == slot_val:
                         send_w.setCurrentIndex(j)
-                        # Update scale label when slot is set
-                        scale_label = scales_widgets.get(f"label_{i}")
-                        if scale_label:
-                            scale_label.setText(f"log_scale[{slot_val}]:")
-                        # Update MCU scale display
-                        self._update_mcu_scale_display(i, slot_val)
                         break
+                send_w.blockSignals(False)
+                # Update scale label when slot is set
+                scale_label = scales_widgets.get(f"label_{i}")
+                if scale_label:
+                    scale_label.setText(f"log_scale[{slot_val}]:")
+                # Update MCU scale display
+                self._update_mcu_scale_display(i, slot_val)
             elif send_w and isinstance(send_w, QtWidgets.QLineEdit):
                 send_w.setText(str(slot_val))
             # Update receive label
@@ -2009,8 +2252,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     e.setText(str(int(val)) if typ in ("u8","u16","u32","i32") else f"{float(val):.6f}".rstrip("0").rstrip("."))
         # Copy log fields (non-array)
         for (name, typ, _unit) in LOG_FIELDS:
-            if is_array_field(name) or name == "log_channels":
-                continue  # Arrays and log_channels handled separately
+            if is_array_field(name) or name == "log_channels" or name == "params_init_key":
+                continue  # Arrays, log_channels, and params_init_key handled separately
             if name not in self._recv_values: continue
             val = self._recv_values[name]
             e = getattr(self, 'log_send_vars', {}).get(name)
@@ -2026,10 +2269,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     slot_val = int(val)
                     if isinstance(w, QtWidgets.QComboBox):
                         # Find the item with matching data value
+                        # Block signals to prevent dropdown from popping up
+                        w.blockSignals(True)
                         for j in range(w.count()):
                             if w.itemData(j) == slot_val:
                                 w.setCurrentIndex(j)
                                 break
+                        w.blockSignals(False)
                     elif isinstance(w, QtWidgets.QLineEdit):
                         w.setText(str(slot_val))
         # Copy log scales (update per-channel scale inputs)
@@ -2669,31 +2915,53 @@ class MainWindow(QtWidgets.QMainWindow):
         w = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(w)
 
+        # Top control bar
         ctrl = QtWidgets.QHBoxLayout()
-        self.grp1_edit = QtWidgets.QLineEdit("(CH2,CH3);(CH4,CH5);(CH6,CH7)")
-        self.grp2_edit = QtWidgets.QLineEdit("(CH8,CH9);(CH10,CH11,CH12)")
-        self.titles1_edit = QtWidgets.QLineEdit("Flux;Torque;Sector/Vector")
-        self.titles2_edit = QtWidgets.QLineEdit("Ia/Ib;CH10-12")
-        self.linkx_chk = QtWidgets.QCheckBox("Link X"); self.linkx_chk.setChecked(True)
-        ctrl.addWidget(QtWidgets.QLabel("Win1 groups:")); ctrl.addWidget(self.grp1_edit)
-        ctrl.addWidget(QtWidgets.QLabel("Win2 groups:")); ctrl.addWidget(self.grp2_edit)
-        ctrl.addWidget(QtWidgets.QLabel("Titles1:")); ctrl.addWidget(self.titles1_edit)
-        ctrl.addWidget(QtWidgets.QLabel("Titles2:")); ctrl.addWidget(self.titles2_edit)
-        ctrl.addWidget(self.linkx_chk)
         btn_load_csv = QtWidgets.QPushButton("Load CSV…"); btn_load_csv.clicked.connect(self._pick_csv_into_graph)
-        ctrl.addWidget(btn_load_csv); ctrl.addStretch(1)
+        ctrl.addWidget(btn_load_csv)
+        self.linkx_chk = QtWidgets.QCheckBox("Link X"); self.linkx_chk.setChecked(True)
+        ctrl.addWidget(self.linkx_chk)
+        ctrl.addStretch(1)
         v.addLayout(ctrl)
 
-        # --- Zoom buttons for GRAPH (CSV) plots ---
-        graph_btns = QtWidgets.QHBoxLayout()
+        # Combined channel selection and zoom controls (will be populated when CSV is loaded)
+        channel_selection_container = QtWidgets.QWidget()
+        channel_selection_layout = QtWidgets.QHBoxLayout(channel_selection_container)
+        
+        # Window 1 channel selection with MultiSelectCombo
+        win1_label = QtWidgets.QLabel("Plot1 vars:")
+        channel_selection_layout.addWidget(win1_label)
+        self.combo_csv_plot1 = MultiSelectCombo()
+        self.combo_csv_plot1.checkedChanged.connect(self._on_csv_channels_changed)
+        channel_selection_layout.addWidget(self.combo_csv_plot1)
+        
+        # Window 2 channel selection with MultiSelectCombo
+        win2_label = QtWidgets.QLabel("Plot2 vars:")
+        channel_selection_layout.addWidget(win2_label)
+        self.combo_csv_plot2 = MultiSelectCombo()
+        self.combo_csv_plot2.checkedChanged.connect(self._on_csv_channels_changed)
+        channel_selection_layout.addWidget(self.combo_csv_plot2)
+        
+        channel_selection_layout.addSpacing(20)  # Add some spacing before zoom buttons
+        
+        # Zoom buttons for GRAPH (CSV) plots - now in same row
         self.graph_zoomx_btn = QtWidgets.QPushButton("Zoom X")
         self.graph_zoomy_btn = QtWidgets.QPushButton("Zoom Y")
         self.graph_fit_btn   = QtWidgets.QPushButton("Fit View")
         for b in (self.graph_zoomx_btn, self.graph_zoomy_btn, self.graph_fit_btn):
             b.setCheckable(True)
-            graph_btns.addWidget(b)
-        graph_btns.addStretch(1)
-        v.addLayout(graph_btns)
+            channel_selection_layout.addWidget(b)
+        
+        channel_selection_layout.addStretch()
+        
+        # Initially hide channel selection (shown when CSV is loaded)
+        channel_selection_container.setVisible(False)
+        v.addWidget(channel_selection_container)
+        
+        # Store references
+        self.channel_selection_container = channel_selection_container
+        self.available_channels = []  # Will be populated when CSV is loaded
+        self.current_csv_path = None
 
         self.two_plot = TwoWindowPlot()
         self.graph_zoomx_btn.clicked.connect(
@@ -2736,29 +3004,75 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda: QtWidgets.QMessageBox.critical(self, "Logger", f"Failed to build CSV:\n{e}")
             )
 
-        QtCore.QTimer.singleShot(0, self._refresh_csv_list)
-
-
-    def _open_csv_in_graph_tab(self):
-        name = self.view_combo.currentText().strip()
-        if not name:
-            self._refresh_csv_list()
-            name = self.view_combo.currentText().strip()
-            if not name:
-                QtWidgets.QMessageBox.information(self, "View", "No CSVs found in ./data")
-                return
-        self._plot_csv_path(os.path.join(DATA_DIR, name))
-
     def _pick_csv_into_graph(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Pick CSV", DATA_DIR, "CSV (*.csv)")
         if not path: return
-        self._plot_csv_path(path)
+        self._load_csv_and_update_channels(path)
+
+    def _load_csv_and_update_channels(self, path: str):
+        """Load CSV, extract available channels, and update UI with MultiSelectCombo."""
+        try:
+            # Read CSV to get available channels
+            df_full = pd.read_csv(
+                path,
+                engine="python",
+                on_bad_lines="skip"
+            )
+            
+            # Get channel columns (exclude metadata columns starting with "#" and unnamed columns)
+            channel_cols = [col for col in df_full.columns 
+                           if col and not str(col).startswith("#") 
+                           and not str(col).strip() == ""
+                           and not str(col).startswith("Unnamed")]
+            
+            if not channel_cols:
+                QtWidgets.QMessageBox.warning(self, "CSV", "No channel columns found in CSV.")
+                return
+            
+            self.available_channels = channel_cols
+            self.current_csv_path = path
+            
+            # Update MultiSelectCombo widgets with available channels
+            self.combo_csv_plot1.set_items(channel_cols)
+            self.combo_csv_plot2.set_items(channel_cols)
+            
+            # Show the channel selection container
+            self.channel_selection_container.setVisible(True)
+            
+            self._set_status(f"CSV loaded: {len(channel_cols)} channels available. Select channels to plot.")
+            
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "CSV", f"Failed to load CSV:\n{e}")
+
+    def _on_csv_channels_changed(self):
+        """Called when channel selection changes in CSV plot combos."""
+        if self.current_csv_path:
+            self._plot_csv_path(self.current_csv_path)
+
 
     def _plot_csv_path(self, path: str):
-        g1 = self._parse_group_str(self.grp1_edit.text())
-        g2 = self._parse_group_str(self.grp2_edit.text())
-        t1 = [t.strip() for t in self.titles1_edit.text().split(";") if t.strip()]
-        t2 = [t.strip() for t in self.titles2_edit.text().split(";") if t.strip()]
+        """Plot CSV with current channel selections."""
+        if not path:
+            return
+        
+        # Get selected channels from MultiSelectCombo widgets
+        channels1 = self.combo_csv_plot1.checked_items()
+        channels2 = self.combo_csv_plot2.checked_items()
+        
+        # Check if at least one channel is selected
+        if not channels1 and not channels2:
+            self._set_status("Please select at least one channel to plot.")
+            return
+        
+        # Convert selected channels to groups format (each channel is its own group)
+        # This allows multiple channels to be plotted together
+        g1 = [(ch,) for ch in channels1] if channels1 else []
+        g2 = [(ch,) for ch in channels2] if channels2 else []
+        
+        # Generate titles automatically from selected channels
+        t1 = channels1 if channels1 else None
+        t2 = channels2 if channels2 else None
+        
         linkx = self.linkx_chk.isChecked()
         try:
             self.two_plot.plot_csv(path, g1, g2, t1, t2, linkx)
@@ -2766,13 +3080,6 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "CSV", f"Failed to plot:\n{e}")
 
-    def _refresh_csv_list(self):
-        try:
-            files = [f for f in os.listdir(DATA_DIR) if f.lower().endswith(".csv")]
-            files.sort(reverse=True)
-            self.view_combo.clear(); self.view_combo.addItems(files)
-        except Exception:
-            self.view_combo.clear()
 
     # ---------------- Logging (shared port) ----------------
     def _toggle_logging(self):
