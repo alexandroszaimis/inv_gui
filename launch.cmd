@@ -1,0 +1,1 @@
+py -3.13 "%~dp0inverter_gui_qt.py" %*
