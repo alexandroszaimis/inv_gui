@@ -114,6 +114,7 @@ FIELDS = [
     ("max_trq_num","u32",""),
     ("cc_trise","f32","s"), ("spdc_trise","f32","s"),
     ("mcm_trise","f32","s"), ("scvm_trise","f32","s"), ("fw_trise","f32","s"),
+    ("foc_lamda","f32","1-2"),
 
     ("current_ramp_time","f32","ms"), ("velocity_ramp_time","f32","ms"),
     ("spd_ref_offset","f32","rpm"), ("low_rpm_thres","f32","rpm"), ("min_freq","f32","Hz"),
@@ -193,29 +194,33 @@ ENUM_MAP_BY_NAME = {
 }
 
 # LOG_TABLE variables (from firmware LOG_TABLE array, in order)
+# Format: (name, type) where type is: "f32"/"f64" (scaled+signed), "i16" (signed, no scale), "u16" (unsigned, no scale)
 LOG_TABLE_VARIABLES = [
-    "TIME_16US",      # 0
-    "TIME_16MS",      # 1
-    "Id_ref",         # 2
-    "Iq_ref",         # 3
-    "Id",             # 4
-    "Iq",             # 5
-    "foc_psi_ref",        # 6
-    "foc_trq_ref",        # 7
-    "trq_actual", 
-    "foc_psi_actual", 
-    "dtc_psi_ref",       
-    "dtc_trq_ref",      
-    "dtc_psi_actual",  
-    "dtc_trq_actual",    
-    "dtc_sector",        
-    "dtc_vector",        
-    "Ia_ph",         
-    "Ib_ph",         
-    "pwr_ref",       
-    "pwr_actual",    
-    "motor_rpm",     
-    "Vdc",           
+    ("TIME_16US", "u16"),      # 0
+    ("TIME_16MS", "u16"),      # 1
+    ("msg_cnt", "u16"),
+    ("Id_ref", "f32"),         # 2
+    ("Iq_ref", "f32"),         # 3
+    ("Id", "f32"),             # 4
+    ("Iq", "f32"),             # 5
+    ("foc_psi_ref", "f32"),        # 6
+    ("foc_trq_ref", "f32"),        # 7
+    ("trq_actual", "f32"), 
+    ("foc_psi_actual", "f32"), 
+    ("dtc_psi_ref", "f32"),       
+    ("dtc_trq_ref", "f32"),      
+    ("dtc_psi_actual", "f32"),  
+    ("dtc_trq_actual", "f32"),    
+    ("dtc_sector", "u16"),        
+    ("dtc_vector", "u16"),        
+    ("Ia_ph", "f32"),         
+    ("Ib_ph", "f32"),         
+    ("pwr_ref", "f32"),       
+    ("pwr_actual", "f32"),    
+    ("motor_rpm", "i16"),
+    ("motor_rpm_actual", "i16"),       
+    ("Vdc", "f32"),
+   
 ]
 
 # DIAG fields (name, type). Keep aligned with firmware order.
@@ -474,26 +479,42 @@ class DataLoggerQt:
         return 1.0
 
     def _decode_ch_num(self, i: int, u16_val: int) -> float:
-        # Check if this is a time channel (TIME_16US or TIME_16MS) - keep unsigned
-        is_time_channel = False
+        # Get variable type from LOG_TABLE_VARIABLES
+        var_type = None
         if hasattr(self.app, "_recv_values") and self.app._recv_values:
             slot_values = self.app._recv_values.get("log_slot[LOG_N_CHANNELS]")
             if isinstance(slot_values, list) and i < len(slot_values):
                 slot_idx = int(slot_values[i])
                 if 0 <= slot_idx < len(LOG_TABLE_VARIABLES):
-                    var_name = LOG_TABLE_VARIABLES[slot_idx]
-                    if var_name in ("TIME_16US", "TIME_16MS"):
-                        is_time_channel = True
+                    var_name, var_type = LOG_TABLE_VARIABLES[slot_idx]
         
-        if not self.SCALE_FLOATS:
+        # Decode based on type:
+        # - f32/f64: scaled and signed
+        # - i16: signed, no scaling
+        # - u16: unsigned, no scaling
+        if var_type == "u16":
+            # Unsigned: no sign conversion, no scaling
             return float(int(u16_val))
-        if i == 0 and not self.SCALE_CH1:
-            return float(int(u16_val))
-        # Time channels should remain unsigned
-        if is_time_channel:
-            return float(int(u16_val))
-        s16 = self._u16_to_s16(int(u16_val))
-        return (s16 << self.SHIFT_BITS) / self._mult(i)
+        elif var_type == "i16":
+            # Signed: convert to signed int16, no scaling
+            s16 = self._u16_to_s16(int(u16_val))
+            return float(s16)
+        elif var_type in ("f32", "f64"):
+            # Float: signed and scaled
+            if not self.SCALE_FLOATS:
+                return float(int(u16_val))
+            if i == 0 and not self.SCALE_CH1:
+                return float(int(u16_val))
+            s16 = self._u16_to_s16(int(u16_val))
+            return (s16 << self.SHIFT_BITS) / self._mult(i)
+        else:
+            # Fallback: default behavior (signed and scaled)
+            if not self.SCALE_FLOATS:
+                return float(int(u16_val))
+            if i == 0 and not self.SCALE_CH1:
+                return float(int(u16_val))
+            s16 = self._u16_to_s16(int(u16_val))
+            return (s16 << self.SHIFT_BITS) / self._mult(i)
 
     def add_monitor_rows(self, rows: list[dict]):
         for r in rows or []:
@@ -569,35 +590,44 @@ class DataLoggerQt:
         lines.append("#MONITOR,")
         lines.append(",".join(ctrl_header + mon_header))
 
+        # helper function to safely convert to int, defaulting to 0 for empty strings
+        def safe_int(val, default=0):
+            if val == "" or val is None:
+                return default
+            try:
+                return int(val)
+            except (ValueError, TypeError):
+                return default
+
         # helper mappers
         def map_control_row(row):
             out = dict(row)
-            if "mode" in out:
-                out["mode"] = enum_name(CTRL_MODE_MAP, int(out["mode"]))
-            if "inv_en" in out:
-                out["inv_en"] = "ENABLED" if int(out["inv_en"]) else "DISABLED"
+            if "mode" in out and out["mode"]:
+                out["mode"] = enum_name(CTRL_MODE_MAP, safe_int(out["mode"]))
+            if "inv_en" in out and out["inv_en"] != "":
+                out["inv_en"] = "ENABLED" if safe_int(out["inv_en"]) else "DISABLED"
             return out
 
         def map_monitor_row(row):
             out = dict(row)
-            if "critical_hw_status" in out:
-                out["critical_hw_status"] = fmt_crit(int(out["critical_hw_status"]))
-            if "aux_hw_status" in out:
-                out["aux_hw_status"] = fmt_bits(int(out["aux_hw_status"]),
+            if "critical_hw_status" in out and out["critical_hw_status"] != "":
+                out["critical_hw_status"] = fmt_crit(safe_int(out["critical_hw_status"]))
+            if "aux_hw_status" in out and out["aux_hw_status"] != "":
+                out["aux_hw_status"] = fmt_bits(safe_int(out["aux_hw_status"]),
                                                 [(b, name) for b, name in LIMITER_FLAG_BITS])  # reuse bits if you wish
             for k in ("last_error","sys_status"):
-                if k in out:
-                    out[k] = enum_name(ERRORS_MAP, int(out[k]))
-            if "handler_status" in out:
-                out["handler_status"] = enum_name(ERRORTYPE_MAP, int(out["handler_status"]))
-            if "latched_error" in out:
-                out["latched_error"] = enum_name(LATCHED_MAP, int(out["latched_error"]))
-            if "actual_state" in out:
-                out["actual_state"] = enum_name(STATE_MAP, int(out["actual_state"]))
-            if "control_mode_actual" in out:
-                out["control_mode_actual"] = enum_name(CTRL_MODE_MAP, int(out["control_mode_actual"]))
-            if "limiter_flags" in out:
-                out["limiter_flags"] = fmt_bits(int(out["limiter_flags"]), LIMITER_FLAG_BITS)
+                if k in out and out[k] != "":
+                    out[k] = enum_name(ERRORS_MAP, safe_int(out[k]))
+            if "handler_status" in out and out["handler_status"] != "":
+                out["handler_status"] = enum_name(ERRORTYPE_MAP, safe_int(out["handler_status"]))
+            if "latched_error" in out and out["latched_error"] != "":
+                out["latched_error"] = enum_name(LATCHED_MAP, safe_int(out["latched_error"]))
+            if "actual_state" in out and out["actual_state"] != "":
+                out["actual_state"] = enum_name(STATE_MAP, safe_int(out["actual_state"]))
+            if "control_mode_actual" in out and out["control_mode_actual"] != "":
+                out["control_mode_actual"] = enum_name(CTRL_MODE_MAP, safe_int(out["control_mode_actual"]))
+            if "limiter_flags" in out and out["limiter_flags"] != "":
+                out["limiter_flags"] = fmt_bits(safe_int(out["limiter_flags"]), LIMITER_FLAG_BITS)
             return out
 
         # monitor rows (if any)
@@ -610,8 +640,17 @@ class DataLoggerQt:
         return lines
 
     def build_csv(self):
-        if not (self.bin_path and os.path.isfile(self.bin_path)):
-            raise RuntimeError("BIN not found for CSV build")
+        if not self.bin_path:
+            raise RuntimeError("BIN path not set for CSV build")
+        if not os.path.isfile(self.bin_path):
+            raise RuntimeError(f"BIN file not found: {self.bin_path}")
+        if not self.csv_path:
+            raise RuntimeError("CSV path not set for CSV build")
+        
+        # Check if BIN file has data
+        bin_size = os.path.getsize(self.bin_path)
+        if bin_size == 0:
+            raise RuntimeError(f"BIN file is empty: {self.bin_path}")
 
         # Get log_channels value from MCU (number of channels to write)
         log_channels = self.NC  # default fallback to self.NC
@@ -633,7 +672,8 @@ class DataLoggerQt:
             if i < len(log_slot_array):
                 slot_idx = int(log_slot_array[i])
                 if 0 <= slot_idx < len(LOG_TABLE_VARIABLES):
-                    channel_names.append(LOG_TABLE_VARIABLES[slot_idx])
+                    var_name, var_type = LOG_TABLE_VARIABLES[slot_idx]
+                    channel_names.append(var_name)
                 else:
                     channel_names.append(f"CH{i+1}")  # fallback if invalid index
             else:
@@ -651,23 +691,34 @@ class DataLoggerQt:
             raw = raw[:usable]
         arr = raw.reshape(-1, log_channels)
 
-        with open(self.csv_path, "w", encoding="utf-8", newline="") as fc:
-            # header - use variable names instead of CH1, CH2, etc.
-            fc.write(",".join(channel_names) + pad_along + ",#SETTINGS,\n")
+        try:
+            with open(self.csv_path, "w", encoding="utf-8", newline="") as fc:
+                # header - use variable names instead of CH1, CH2, etc.
+                fc.write(",".join(channel_names) + pad_along + ",#SETTINGS,\n")
 
-            side_idx = 0
-            # write rows
-            for k in range(arr.shape[0]):
-                row_u16 = arr[k]
-                # Only write the first log_channels columns
-                fields = [f"{self._decode_ch_num(i, int(row_u16[i])):.9g}" for i in range(log_channels)]
-                if side_idx < len(side_lines):
-                    fc.write(",".join(fields) + pad_along + "," + side_lines[side_idx] + "\n")
-                    side_idx += 1
-                else:
-                    fc.write(",".join(fields) + "\n")
+                side_idx = 0
+                # write rows
+                for k in range(arr.shape[0]):
+                    row_u16 = arr[k]
+                    # Only write the first log_channels columns
+                    fields = [f"{self._decode_ch_num(i, int(row_u16[i])):.9g}" for i in range(log_channels)]
+                    if side_idx < len(side_lines):
+                        fc.write(",".join(fields) + pad_along + "," + side_lines[side_idx] + "\n")
+                        side_idx += 1
+                    else:
+                        fc.write(",".join(fields) + "\n")
+            
+            # Verify CSV was written successfully
+            if not os.path.isfile(self.csv_path):
+                raise RuntimeError(f"CSV file was not created: {self.csv_path}")
+            csv_size = os.path.getsize(self.csv_path)
+            if csv_size == 0:
+                raise RuntimeError(f"CSV file is empty: {self.csv_path}")
+        except Exception as e:
+            # If CSV write failed, don't delete BIN file
+            raise RuntimeError(f"Failed to write CSV file: {e}")
 
-        # remove BIN to keep folder tidy
+        # remove BIN to keep folder tidy (only if CSV was created successfully)
         try:
             os.remove(self.bin_path)
         except Exception:
@@ -802,10 +853,206 @@ class MultiSelectCombo(QtWidgets.QComboBox):
         txt = ", ".join(self.checked_items())
         self.lineEdit().setText(txt if txt else "— select —")
 
+# ----------------------- CSV Loader Thread -----------------------
+class CSVLoaderThread(QtCore.QThread):
+    """Background thread for loading CSV data without freezing the GUI."""
+    sig_data_loaded = QtCore.Signal(object)  # Emits DataFrame when loaded
+    sig_error = QtCore.Signal(str)  # Emits error message
+    
+    def __init__(self, csv_path, needed_channels, downsample_factor, cached_data, cached_downsample, selective_range, parent=None):
+        super().__init__(parent)
+        self.csv_path = csv_path
+        self.needed_channels = needed_channels
+        self.downsample_factor = downsample_factor
+        self.cached_data = cached_data
+        self.cached_downsample = cached_downsample
+        self.selective_range = selective_range
+    
+    def run(self):
+        """Load CSV data in background thread."""
+        try:
+            df = self._load_csv_data()
+            self.sig_data_loaded.emit(df)
+            # Clear references immediately after emitting to free memory
+            del df
+            self.cached_data = None
+            import gc
+            gc.collect()
+        except Exception as e:
+            self.sig_error.emit(str(e))
+    
+    def _load_csv_data(self):
+        """Load CSV data - extracted from plot_csv method."""
+        import pandas as pd
+        import numpy as np
+        
+        # Always use full CSV loading
+        return self._load_full_csv()
+    
+    def _load_full_csv(self):
+        """Load full CSV with downsampling."""
+        import pandas as pd
+        import numpy as np
+        
+        # Read header
+        try:
+            df_header = pd.read_csv(
+                self.csv_path,
+                engine="c",
+                nrows=0,
+                on_bad_lines="skip"
+            )
+        except Exception:
+            df_header = pd.read_csv(
+                self.csv_path,
+                engine="python",
+                nrows=0,
+                on_bad_lines="skip"
+            )
+        
+        all_channel_cols = [col for col in df_header.columns 
+                           if col and not str(col).startswith("#") 
+                           and not str(col).strip() == ""
+                           and not str(col).startswith("Unnamed")]
+        
+        if not all_channel_cols:
+            raise ValueError("No channel columns found in CSV.")
+        
+        cols_to_read = [col for col in self.needed_channels if col in all_channel_cols]
+        if not cols_to_read:
+            raise ValueError(f"None of the selected channels found in CSV. Available: {all_channel_cols[:10]}...")
+        
+        # Read CSV with downsampling using chunked reading for memory efficiency
+        read_params = {
+            "usecols": cols_to_read,
+            "dtype": np.float32,
+            "on_bad_lines": "skip",
+            "low_memory": False
+        }
+        
+        if self.downsample_factor > 1:
+            # Use chunked reading with proper downsampling
+            # Key: track the absolute row number across chunks to maintain correct pattern
+            chunk_size = 10000  # Read 10k rows at a time
+            chunks = []
+            absolute_row = 0  # Track absolute row number in original file (0-indexed, excluding header)
+            
+            try:
+                chunk_iter = pd.read_csv(
+                    self.csv_path,
+                    engine="c",
+                    chunksize=chunk_size,
+                    **read_params
+                )
+                for chunk in chunk_iter:
+                    chunk_len = len(chunk)
+                    if chunk_len == 0:
+                        continue
+                    
+                    # Create boolean mask using numpy for efficiency
+                    # Calculate which rows to keep: rows where (absolute_row + i) % downsample_factor == 0
+                    # This ensures we keep every Nth row consistently across all chunks
+                    chunk_start_row = absolute_row
+                    chunk_end_row = absolute_row + chunk_len
+                    
+                    # Create array of absolute row numbers for this chunk
+                    absolute_rows = np.arange(chunk_start_row, chunk_end_row)
+                    
+                    # Create boolean mask: keep rows where absolute_row % downsample_factor == 0
+                    # CRITICAL: Use self.downsample_factor directly, don't modify it
+                    downsample = int(self.downsample_factor)  # Ensure it's an integer
+                    
+                    # Debug: verify downsample_factor is correct (only for first chunk)
+                    if chunk_start_row == 0:  # First chunk
+                        print(f"DEBUG: CSVLoaderThread.downsample_factor = {self.downsample_factor}, using downsample = {downsample}")
+                        expected_pattern = list(range(0, min(20, chunk_len), downsample))
+                        print(f"DEBUG: Expected pattern for x{downsample}: {expected_pattern}")
+                    
+                    # Create mask: keep rows where absolute_row % downsample == 0
+                    keep_mask = (absolute_rows % downsample == 0)
+                    
+                    # Debug: verify first few rows for first chunk only
+                    if chunk_start_row == 0:  # First chunk
+                        first_kept_rows = absolute_rows[keep_mask][:10]
+                        print(f"DEBUG: Actual kept rows: {first_kept_rows[:10]}")
+                    
+                    # Apply mask to keep only selected rows
+                    # Use .iloc with boolean mask to ensure correct indexing
+                    if np.any(keep_mask):
+                        # Convert numpy boolean array to list for pandas compatibility
+                        keep_mask_list = keep_mask.tolist()
+                        downsampled_chunk = chunk.iloc[keep_mask_list].copy()
+                        chunks.append(downsampled_chunk)
+                    
+                    # Update absolute_row for next chunk
+                    absolute_row = chunk_end_row
+                    
+                    # Free memory periodically
+                    if len(chunks) > 100:
+                        df_temp = pd.concat(chunks, ignore_index=True)
+                        chunks = [df_temp]
+            except Exception:
+                # Fallback: read all and downsample
+                read_params_python = read_params.copy()
+                read_params_python.pop("low_memory", None)
+                df = pd.read_csv(
+                    self.csv_path,
+                    engine="python",
+                    **read_params_python
+                )
+                df = df.iloc[::self.downsample_factor].copy()
+                chunks = [df]
+            
+            # Concatenate all chunks
+            if chunks:
+                df = pd.concat(chunks, ignore_index=True)
+            else:
+                df = pd.DataFrame(columns=cols_to_read)
+        else:
+            # No downsampling - read normally
+            try:
+                df = pd.read_csv(
+                    self.csv_path,
+                    engine="c",
+                    **read_params
+                )
+            except Exception:
+                # Python engine doesn't support low_memory parameter
+                read_params_python = read_params.copy()
+                read_params_python.pop("low_memory", None)
+                df = pd.read_csv(
+                    self.csv_path,
+                    engine="python",
+                    **read_params_python
+                )
+        
+        # Convert to numeric in-place to save memory
+        for col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce", downcast='float')
+        df = df.dropna(how="all")
+        
+        # Ensure all columns are float32 (downcast might not work for all)
+        for col in df.columns:
+            if df[col].dtype == 'float64':
+                df[col] = df[col].astype('float32', copy=False)
+        
+        return df
+
 # ----------------------- Plot widgets (pyqtgraph) -----------------------
 class TwoWindowPlot(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._cached_csv_data = None  # Cache CSV data to avoid re-reading
+        self._cached_csv_path = None
+        self._cached_downsample_factor = 1  # Track downsample factor used for cached data
+        self._progress_bar = None  # Reference to progress bar (set by MainWindow)
+        self._csv_loader_thread = None  # Background thread for CSV loading
+        self._pending_plot_params = None  # Store plot parameters while loading
+        self._current_csv_path = None  # Track current CSV path
+        self._current_groups1 = None  # Track current plot groups
+        self._current_groups2 = None
+        self._current_link_x = True
+        self._current_downsample_factor = 1  # Track current downsample factor
 
         # ---- single, persistent layout ----
         self._vbox = QtWidgets.QVBoxLayout(self)
@@ -872,9 +1119,16 @@ class TwoWindowPlot(QtWidgets.QWidget):
         names2 = _flatten(groups2)
 
         # Clear old curves only (do NOT re-add widgets/legends)
+        # Only remove curves that are explicitly not in the new groups
+        # This preserves curves that might be temporarily missing from data
         for (win_id, name), curve in list(self._curves.items()):
-            if ((win_id == 1 and name not in names1) or
-                (win_id == 2 and name not in names2)):
+            should_remove = False
+            if win_id == 1 and name not in names1:
+                should_remove = True
+            elif win_id == 2 and name not in names2:
+                should_remove = True
+            
+            if should_remove:
                 try:
                     (self.plot1 if win_id == 1 else self.plot2).removeItem(curve)
                 except Exception:
@@ -917,15 +1171,21 @@ class TwoWindowPlot(QtWidgets.QWidget):
                 vb.setMouseMode(pg.ViewBox.RectMode)
                 vb.disableAutoRange(axis=pg.ViewBox.YAxis)
                 vb.enableAutoRange(axis=pg.ViewBox.XAxis)
+                # Restrict mouse wheel zoom to x-axis only
+                vb.setMouseEnabled(x=True, y=False)
         elif mode == "y":
             for vb in (vb1, vb2):
                 vb.setMouseMode(pg.ViewBox.RectMode)
                 vb.disableAutoRange(axis=pg.ViewBox.XAxis)
                 vb.enableAutoRange(axis=pg.ViewBox.YAxis)
+                # Restrict mouse wheel zoom to y-axis only
+                vb.setMouseEnabled(x=False, y=True)
         else:
             for vb in (vb1, vb2):
                 vb.enableAutoRange(axis=pg.ViewBox.XYAxes)
                 vb.autoRange()
+                # Re-enable both axes for normal zoom
+                vb.setMouseEnabled(x=True, y=True)
 
     def zoom_fit(self):
         """Reset both plots to show all data (not cumulative unzoom)."""
@@ -953,6 +1213,8 @@ class TwoWindowPlot(QtWidgets.QWidget):
                 if ymax == ymin:
                     ymax += 1.0
                 vb.setRange(xRange=(xmin, xmax), yRange=(ymin, ymax), padding=0.05)
+            # Re-enable both axes for normal zoom
+            vb.setMouseEnabled(x=True, y=True)
             # 3) re-enable autorange for next user zooms
             vb.enableAutoRange(axis=pg.ViewBox.XYAxes)
 
@@ -971,91 +1233,333 @@ class TwoWindowPlot(QtWidgets.QWidget):
         if self.plot2.plotItem.legend is None: self.plot2.addLegend()
         self.plot2.showGrid(x=True, y=True)
 
-    def plot_csv(self, csv_path: str, groups1, groups2, titles1=None, titles2=None, link_x=True):
-        # Load channel columns dynamically (variable names or CH* columns)
+    def _get_visible_x_range(self, link_x=True):
+        """Get the visible x-axis range from the plots (for selective high-res loading)."""
         try:
-            # Read full CSV first
-            df_full = pd.read_csv(
-                csv_path,
-                engine="python",
-                on_bad_lines="skip"
-            )
-            
-            # Identify channel columns: exclude metadata columns (starting with "#"), empty columns, and unnamed columns
-            channel_cols = [col for col in df_full.columns 
-                           if col and not str(col).startswith("#") 
-                           and not str(col).strip() == ""
-                           and not str(col).startswith("Unnamed")]
-            
-            if not channel_cols:
-                raise ValueError("No channel columns found in CSV.")
-            
-            # Extract only channel columns
-            df = df_full[channel_cols]
+            vb1 = self.plot1.getViewBox()
+            vb2 = self.plot2.getViewBox()
+            # Get visible range (returns (xmin, xmax), (ymin, ymax))
+            range1 = vb1.viewRange()
+            range2 = vb2.viewRange()
+            # Use the intersection of both ranges (or plot1 if not linked)
+            xmin1, xmax1 = range1[0]
+            xmin2, xmax2 = range2[0]
+            # Return the intersection (or plot1 range if not linked)
+            if link_x:
+                xmin = max(xmin1, xmin2)
+                xmax = min(xmax1, xmax2)
+            else:
+                xmin = xmin1
+                xmax = xmax1
+            return (xmin, xmax) if xmax > xmin else None
         except Exception:
-            # Fallback: manual parsing
-            with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
-                header_line = f.readline()
-                header_cols = [col.strip() for col in header_line.split(",")]
+            return None
+    
+    def plot_csv(self, csv_path: str, groups1, groups2, titles1=None, titles2=None, link_x=True, downsample_factor=1):
+        # Get list of channels we need to plot
+        needed_channels = set()
+        for group in groups1:
+            needed_channels.update(group)
+        for group in groups2:
+            needed_channels.update(group)
+        
+        if not needed_channels:
+            raise ValueError("No channels selected for plotting.")
+        
+        # Store current plot params for zoom reload
+        self._current_csv_path = csv_path
+        self._current_groups1 = groups1
+        self._current_groups2 = groups2
+        self._current_link_x = link_x
+        self._current_downsample_factor = downsample_factor  # Store current downsample factor
+        
+        df = None
+        
+        # Check if we have cached data for this file (same downsample factor)
+        # IMPORTANT: Only use cache if downsample_factor matches exactly
+        # Using wrong downsample_factor cache would give incorrect data
+        if (self._cached_csv_path == csv_path and 
+            self._cached_csv_data is not None and 
+            self._cached_downsample_factor == downsample_factor):
+            cached_df = self._cached_csv_data
+            cached_cols = set(cached_df.columns)
             
-            # Find all channel column indices (exclude metadata columns starting with "#")
-            ch_indices = []
-            ch_names = []
-            for i, col in enumerate(header_cols):
-                if col and not col.startswith("#") and col.strip():
-                    ch_indices.append(i)
-                    ch_names.append(col)
-            
-            if not ch_indices:
-                raise ValueError("No channel columns found in CSV.")
-            
-            # Read data rows
-            data = []
-            with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
-                _ = f.readline()  # skip header
-                for line in f:
-                    parts = [p.strip() for p in line.split(",")]
-                    row = []
-                    for idx in ch_indices:
-                        if idx < len(parts):
-                            try:
-                                row.append(float(parts[idx]))
-                            except:
-                                row.append(np.nan)
+            # Check if we have all needed channels in cache
+            if needed_channels.issubset(cached_cols):
+                # Use cached data - extract only needed channels
+                df = cached_df[list(needed_channels)]
+            else:
+                # Some channels missing - read only the missing ones and merge
+                missing_channels = needed_channels - cached_cols
+                if missing_channels:
+                    # Read only missing channels and merge with cache
+                    try:
+                        # Read header to verify channels exist
+                        try:
+                            df_header = pd.read_csv(
+                                csv_path,
+                                engine="c",
+                                nrows=0,
+                                on_bad_lines="skip"
+                            )
+                        except Exception:
+                            df_header = pd.read_csv(
+                                csv_path,
+                                engine="python",
+                                nrows=0,
+                                on_bad_lines="skip"
+                            )
+                        
+                        # Verify missing channels exist in CSV
+                        available_cols = set(df_header.columns)
+                        cols_to_read = [col for col in missing_channels if col in available_cols]
+                        
+                        if cols_to_read:
+                            # Load missing channels in background thread to keep GUI responsive
+                            # Stop any existing loader thread
+                            if self._csv_loader_thread and self._csv_loader_thread.isRunning():
+                                self._csv_loader_thread.terminate()
+                                self._csv_loader_thread.wait()
+                                self._csv_loader_thread = None
+                            
+                            # Show loading progress bar
+                            if self._progress_bar:
+                                self._progress_bar.setMinimum(0)
+                                self._progress_bar.setMaximum(0)
+                                self._progress_bar.setTextVisible(False)
+                                self._progress_bar.setFormat("")
+                                self._progress_bar.show()
+                            
+                            # Store parameters for background loading
+                            self._pending_plot_params = {
+                                'csv_path': csv_path,
+                                'groups1': groups1,
+                                'groups2': groups2,
+                                'titles1': titles1,
+                                'titles2': titles2,
+                                'link_x': link_x,
+                                'downsample_factor': downsample_factor,
+                                'merge_with_cache': cached_df,  # Pass cached data for merging
+                                'missing_channels': cols_to_read
+                            }
+                            
+                            # Start background thread to load missing channels
+                            self._csv_loader_thread = CSVLoaderThread(
+                                csv_path,
+                                set(cols_to_read),  # Only load missing channels
+                                downsample_factor,
+                                cached_df,  # Pass cached data for merging
+                                cached_downsample,
+                                None,
+                                self
+                            )
+                            self._csv_loader_thread.sig_data_loaded.connect(self._on_cache_merge_data_loaded)
+                            self._csv_loader_thread.sig_error.connect(self._on_csv_load_error)
+                            self._csv_loader_thread.start()
+                            return  # Exit early - plotting will happen when data is loaded
                         else:
-                            row.append(np.nan)
-                    if any(np.isfinite(row)):
-                        data.append(row)
-            df = pd.DataFrame(data, columns=ch_names)
-
-        # Convert to numeric, coercing errors to NaN
-        df = df.apply(pd.to_numeric, errors="coerce")
+                            # Channels don't exist, use what we have
+                            df = cached_df[list(needed_channels & cached_cols)]
+                    except Exception:
+                        # If merge fails, fall back to full reload
+                        self._cached_csv_data = None
+                        self._cached_csv_path = None
         
-        # Filter out rows where all channel values are NaN (metadata rows, empty rows, etc.)
-        # Keep rows that have at least one valid numeric value
-        df = df.dropna(how="all")
+        # Load with downsampling if needed - use background thread to keep GUI responsive
+        if df is None and downsample_factor > 1:
+            # Use background thread for downsampled loading too
+            pass  # Fall through to background thread loading below
         
+        # Load CSV if not cached - use background thread
+        if df is None:
+            # Stop any existing loader thread and clear its data to free memory
+            if self._csv_loader_thread and self._csv_loader_thread.isRunning():
+                self._csv_loader_thread.terminate()
+                self._csv_loader_thread.wait()
+                # Clear thread's data to free memory
+                if hasattr(self._csv_loader_thread, 'df'):
+                    del self._csv_loader_thread.df
+                self._csv_loader_thread = None
+            
+            # Show loading progress bar
+            if self._progress_bar:
+                self._progress_bar.setMinimum(0)
+                self._progress_bar.setMaximum(0)
+                self._progress_bar.setTextVisible(False)
+                self._progress_bar.setFormat("")
+                self._progress_bar.show()
+            
+            # Store plot parameters for when data is loaded
+            self._pending_plot_params = {
+                'csv_path': csv_path,
+                'groups1': groups1,
+                'groups2': groups2,
+                'titles1': titles1,
+                'titles2': titles2,
+                'link_x': link_x,
+                'downsample_factor': downsample_factor
+            }
+            
+            # Start background thread to load CSV (full file with downsampling)
+            # Debug: verify downsample_factor is correct
+            print(f"DEBUG: plot_csv called with downsample_factor = {downsample_factor}")
+            self._csv_loader_thread = CSVLoaderThread(
+                csv_path,
+                needed_channels,
+                downsample_factor,  # Pass downsample_factor directly
+                None,  # No cached data for background thread
+                1,     # No cached downsample
+                None,  # No selective range - always load full file
+                self
+            )
+            print(f"DEBUG: CSVLoaderThread created with downsample_factor = {self._csv_loader_thread.downsample_factor}")
+            self._csv_loader_thread.sig_data_loaded.connect(self._on_csv_data_loaded)
+            self._csv_loader_thread.sig_error.connect(self._on_csv_load_error)
+            self._csv_loader_thread.start()
+            return  # Exit early - plotting will happen when data is loaded
+        
+        # If we have data, plot it immediately
+        self._do_plot(df, groups1, groups2, titles1, titles2, link_x, downsample_factor)
+    
+    def _on_csv_data_loaded(self, df):
+        """Called when CSV data is loaded in background thread."""
+        if self._pending_plot_params is None:
+            return
+        
+        # Check if this is a cache merge operation
+        import pandas as pd
+        if 'merge_with_cache' in self._pending_plot_params:
+            # This is a cache merge - merge the new data with cached data
+            cached_df = self._pending_plot_params['merge_with_cache']
+            df = pd.concat([cached_df, df], axis=1)
+        
+        # Update cache
+        csv_path = self._pending_plot_params['csv_path']
+        # Don't copy - use DataFrame directly to save memory
+        self._cached_csv_data = df
+        self._cached_csv_path = csv_path
+        self._cached_downsample_factor = self._csv_loader_thread.downsample_factor
+        
+        # Clear thread references immediately to free memory
+        self._csv_loader_thread.cached_data = None
+        thread_ref = self._csv_loader_thread
+        self._csv_loader_thread = None
+        del thread_ref
+        
+        # Hide progress bar
+        if self._progress_bar:
+            self._progress_bar.setVisible(False)
+        
+        # Extract needed channels (use view, not copy)
+        needed_channels = set()
+        for group in self._pending_plot_params['groups1']:
+            needed_channels.update(group)
+        for group in self._pending_plot_params['groups2']:
+            needed_channels.update(group)
+        
+        if needed_channels:
+            available_channels = [col for col in needed_channels if col in df.columns]
+            if available_channels:
+                # Filter columns - this creates a view, not a copy (pandas is smart about this)
+                df = df[available_channels].copy()  # Actually need copy for thread safety, but minimize columns first
+        
+        # Update visible range for zoom detection
+        visible_range = self._get_visible_x_range(self._pending_plot_params['link_x'])
+        self._current_visible_range = visible_range
+        
+        # Plot the data
+        self._do_plot(
+            df,
+            self._pending_plot_params['groups1'],
+            self._pending_plot_params['groups2'],
+            self._pending_plot_params['titles1'],
+            self._pending_plot_params['titles2'],
+            self._pending_plot_params['link_x'],
+            self._pending_plot_params['downsample_factor']
+        )
+        
+        self._pending_plot_params = None
+    
+    def _on_cache_merge_data_loaded(self, df):
+        """Called when missing channels are loaded for cache merge - same as _on_csv_data_loaded."""
+        self._on_csv_data_loaded(df)
+    
+    def _on_csv_load_error(self, error_msg):
+        """Called when CSV loading fails in background thread."""
+        print(f"CSV load error: {error_msg}")
+        if self._progress_bar:
+            self._progress_bar.setVisible(False)
+        # Fall back to x4
+        if self._pending_plot_params:
+            self.plot_csv(
+                self._pending_plot_params['csv_path'],
+                self._pending_plot_params['groups1'],
+                self._pending_plot_params['groups2'],
+                link_x=self._pending_plot_params['link_x'],
+                downsample_factor=4  # Fall back to x4
+            )
+        self._pending_plot_params = None
+    
+    def _do_plot(self, df, groups1, groups2, titles1, titles2, link_x, downsample_factor):
+        """Actually perform the plotting (called after data is loaded)."""
         if df.empty or len(df.columns) == 0:
             raise ValueError("No valid channel data found in CSV.")
 
-        # (A) Configure groups/curves first
-        self.set_groups(groups1, groups2, titles1, titles2, link_x)
+        try:
+            # Process events before starting to keep GUI responsive
+            QtWidgets.QApplication.processEvents()
+            
+            # (A) Configure groups/curves first
+            self.set_groups(groups1, groups2, titles1, titles2, link_x)
+            
+            # Process events after set_groups to keep GUI responsive
+            QtWidgets.QApplication.processEvents()
 
-        # (B) Pre-build a *shared* X and use coarse decimation for speed
-        n = len(df.index)
-        # target ~20k points per curve max (tweakable)
-        ds = max(1, n // 20000)
-        x_full = np.arange(n, dtype=np.float32)
-        x = x_full[::ds]
+            # Build x-axis array
+            n = len(df.index)
+            x_full = np.arange(n, dtype=np.float64) * downsample_factor  # Scale x-axis by downsample factor
+            
+            # IMPORTANT: When data is already downsampled (downsample_factor > 1), 
+            # we should NOT apply additional adaptive decimation, as it would further reduce resolution.
+            # The data is already at the desired resolution from CSV loading.
+            # For x1, show ALL data points - no decimation at all.
+            if downsample_factor == 1:
+                # At x1, show all data points - no decimation
+                ds = 1
+                x = x_full
+            else:
+                # For downsampled data (x2, x4, x8, etc.), use all points - no additional decimation
+                # The data is already at the correct resolution from CSV loading
+                ds = 1
+                x = x_full
 
-        # (C) Push data
-        for (win_id, name), curve in self._curves.items():
-            if name in df.columns:
-                y_col = df[name].to_numpy(np.float32)
-                # slice once; skipFiniteCheck=True assumes no NaNs after dropna
-                curve.setData(x=x, y=y_col[::ds], connect='finite', skipFiniteCheck=True)
+            # (C) Push data - this can take time with large datasets
+            num_curves = len(self._curves)
+            curve_idx = 0
+            for (win_id, name), curve in self._curves.items():
+                if name in df.columns:
+                    # Use .values directly and convert to float32 to avoid unnecessary copies
+                    y_col = df[name].values.astype(np.float32, copy=False)
+                    # x is already decimated, y needs to match
+                    curve.setData(x=x, y=y_col[::ds], connect='finite', skipFiniteCheck=True)
+                    curve_idx += 1
+                    # Update UI more frequently to keep GUI responsive, especially for second plot
+                    if curve_idx % 3 == 0:  # Update every 3 curves (more frequent)
+                        QtWidgets.QApplication.processEvents()
+                else:
+                    # If a curve doesn't have data, clear it
+                    # (but don't remove it - it might be added in next update)
+                    curve.setData(x=[], y=[])
+            
+            # Final processEvents to ensure all updates are rendered
+            QtWidgets.QApplication.processEvents()
+        finally:
+            # Hide loading progress bar after plotting completes
+            if self._progress_bar:
+                self._progress_bar.setVisible(False)
 
 
+    
     # ---------- helpers ----------
     def _pen_for(self, name: str):
         if name not in self._ch_pen:
@@ -1083,6 +1587,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.dlogger = None
         self._last_diag_values = {}   # store most recent DIAG_STATUS dict
+        # Throttle UI updates to prevent lag when MCU sends DIAG_STATUS frequently
+        self._diag_update_timer = QtCore.QTimer(self)
+        self._diag_update_timer.setSingleShot(True)
+        self._diag_update_timer.timeout.connect(self._apply_pending_diag_update)
+        self._pending_diag_values = None  # Store latest values for deferred UI update
+        self._diag_update_interval_ms = 50  # Update UI at most every 50ms (20 Hz)
+        # Throttle live plot updates separately (plots can handle higher rates)
+        self._live_plot_timer = QtCore.QTimer(self)
+        self._live_plot_timer.setSingleShot(True)
+        self._live_plot_timer.timeout.connect(self._apply_pending_live_plot_update)
+        self._pending_live_plot_values = None
+        self._live_plot_update_interval_ms = 33  # Update plots at most every 33ms (~30 Hz)
+        self._last_status_text = ("", "")  # Cache status text to avoid unnecessary updates
 
         # ============ Live plot buffers ============
         self.live_max_samples = 500  # default window size (adjustable)
@@ -1520,8 +2037,8 @@ class MainWindow(QtWidgets.QMainWindow):
             send_combo = QtWidgets.QComboBox()
             send_combo.setFixedWidth(200)
             # Add all available variables with their index from LOG_TABLE (no "None" option)
-            for idx, var_name in enumerate(available_vars):
-                send_combo.addItem(f"{idx} - {var_name}", idx)
+            for idx, (var_name, var_type) in enumerate(available_vars):
+                send_combo.addItem(f"{idx} - {var_name} ({var_type})", idx)
             
             # When slot selection changes, update the scale label immediately
             def make_slot_changed_handler(channel_idx, combo_widget):
@@ -2892,6 +3409,9 @@ class MainWindow(QtWidgets.QMainWindow):
             vb2.setLimits(yMin=None, yMax=None)
             vb1.disableAutoRange(axis=pg.ViewBox.YAxis)
             vb2.disableAutoRange(axis=pg.ViewBox.YAxis)
+            # Restrict mouse wheel zoom to x-axis only
+            vb1.setMouseEnabled(x=True, y=False)
+            vb2.setMouseEnabled(x=True, y=False)
         elif mode == "y":
             vb1.setMouseMode(pg.ViewBox.RectMode)
             vb2.setMouseMode(pg.ViewBox.RectMode)
@@ -2899,9 +3419,15 @@ class MainWindow(QtWidgets.QMainWindow):
             vb2.setAspectLocked(False)
             vb1.disableAutoRange(axis=pg.ViewBox.XAxis)
             vb2.disableAutoRange(axis=pg.ViewBox.XAxis)
+            # Restrict mouse wheel zoom to y-axis only
+            vb1.setMouseEnabled(x=False, y=True)
+            vb2.setMouseEnabled(x=False, y=True)
         else:
             vb1.enableAutoRange(axis=pg.ViewBox.XYAxes)
             vb2.enableAutoRange(axis=pg.ViewBox.XYAxes)
+            # Re-enable both axes for normal zoom
+            vb1.setMouseEnabled(x=True, y=True)
+            vb2.setMouseEnabled(x=True, y=True)
 
     def _zoom_fit(self):
         self.zoomx_btn.setChecked(False)
@@ -2909,6 +3435,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for vb in (self.live_plot1.getViewBox(), self.live_plot2.getViewBox()):
             vb.enableAutoRange(axis=pg.ViewBox.XYAxes)
             vb.autoRange()
+            # Re-enable both axes for normal zoom
+            vb.setMouseEnabled(x=True, y=True)
 
     # ---------------- Graph tab ----------------
     def _build_graph_tab(self):
@@ -2942,7 +3470,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_csv_plot2.checkedChanged.connect(self._on_csv_channels_changed)
         channel_selection_layout.addWidget(self.combo_csv_plot2)
         
-        channel_selection_layout.addSpacing(20)  # Add some spacing before zoom buttons
+        channel_selection_layout.addSpacing(20)  # Add some spacing before controls
+        
+        # Downsampling dropdown
+        downsample_label = QtWidgets.QLabel("Downsample:")
+        channel_selection_layout.addWidget(downsample_label)
+        self.csv_downsample_combo = QtWidgets.QComboBox()
+        self.csv_downsample_combo.addItem("x1", 1)
+        self.csv_downsample_combo.addItem("x2", 2)
+        self.csv_downsample_combo.addItem("x4", 4)
+        self.csv_downsample_combo.addItem("x8", 8)
+        self.csv_downsample_combo.addItem("x16", 16)
+        self.csv_downsample_combo.addItem("x32", 32)
+        self.csv_downsample_combo.addItem("x64", 64)
+        self.csv_downsample_combo.setCurrentIndex(0)  # Default to x1 (no downsampling)
+        self.csv_downsample_combo.currentIndexChanged.connect(self._on_downsample_changed)
+        channel_selection_layout.addWidget(self.csv_downsample_combo)
+        
+        channel_selection_layout.addSpacing(10)
         
         # Zoom buttons for GRAPH (CSV) plots - now in same row
         self.graph_zoomx_btn = QtWidgets.QPushButton("Zoom X")
@@ -2951,6 +3496,14 @@ class MainWindow(QtWidgets.QMainWindow):
         for b in (self.graph_zoomx_btn, self.graph_zoomy_btn, self.graph_fit_btn):
             b.setCheckable(True)
             channel_selection_layout.addWidget(b)
+        
+        # Loading progress bar (initially hidden)
+        self.csv_loading_progress = QtWidgets.QProgressBar()
+        self.csv_loading_progress.setFixedWidth(150)
+        self.csv_loading_progress.setTextVisible(False)  # Hide percentage text
+        self.csv_loading_progress.setFormat("")  # Clear format to avoid any text
+        self.csv_loading_progress.setVisible(False)
+        channel_selection_layout.addWidget(self.csv_loading_progress)
         
         channel_selection_layout.addStretch()
         
@@ -2962,8 +3515,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_selection_container = channel_selection_container
         self.available_channels = []  # Will be populated when CSV is loaded
         self.current_csv_path = None
+        self._cached_csv_data = None  # Cache CSV data to avoid re-reading
+        self._cached_csv_path = None
 
         self.two_plot = TwoWindowPlot()
+        # Pass progress bar reference to plot widget
+        self.two_plot._progress_bar = self.csv_loading_progress
         self.graph_zoomx_btn.clicked.connect(
             lambda: (self.graph_zoomy_btn.setChecked(False),
                     self.two_plot.set_zoom_mode("x"))
@@ -2995,13 +3552,34 @@ class MainWindow(QtWidgets.QMainWindow):
         """Run CSV build in a background thread and report back to UI safely."""
         try:
             # Do the heavy work off the GUI thread
-            if self.dlogger:
-                self.dlogger.build_csv()
-            QtCore.QTimer.singleShot(0, lambda: self._set_status("CSV built ✅"))
+            if not self.dlogger:
+                QtCore.QTimer.singleShot(0, lambda: self._set_status("No logger instance"))
+                return
+            
+            # Check if paths are set
+            if not self.dlogger.bin_path:
+                QtCore.QTimer.singleShot(0, lambda: self._set_status("BIN path not set"))
+                return
+            if not self.dlogger.csv_path:
+                QtCore.QTimer.singleShot(0, lambda: self._set_status("CSV path not set"))
+                return
+            
+            # Build CSV
+            self.dlogger.build_csv()
+            
+            # Verify CSV was created
+            if os.path.isfile(self.dlogger.csv_path):
+                csv_size = os.path.getsize(self.dlogger.csv_path)
+                QtCore.QTimer.singleShot(0, lambda: self._set_status(f"CSV built ✅: {os.path.basename(self.dlogger.csv_path)} ({csv_size} bytes)"))
+            else:
+                QtCore.QTimer.singleShot(0, lambda: QtWidgets.QMessageBox.critical(self, "Logger", f"CSV build completed but file not found:\n{self.dlogger.csv_path}"))
         except Exception as e:
+            import traceback
+            error_msg = f"Failed to build CSV:\n{e}\n\n{traceback.format_exc()}"
+            print(f"CSV build error: {error_msg}")
             QtCore.QTimer.singleShot(
                 0,
-                lambda: QtWidgets.QMessageBox.critical(self, "Logger", f"Failed to build CSV:\n{e}")
+                lambda: QtWidgets.QMessageBox.critical(self, "Logger", error_msg)
             )
 
     def _pick_csv_into_graph(self):
@@ -3012,15 +3590,26 @@ class MainWindow(QtWidgets.QMainWindow):
     def _load_csv_and_update_channels(self, path: str):
         """Load CSV, extract available channels, and update UI with MultiSelectCombo."""
         try:
-            # Read CSV to get available channels
-            df_full = pd.read_csv(
-                path,
-                engine="python",
-                on_bad_lines="skip"
-            )
+            # Only read header row to get column names (much faster for large files)
+            try:
+                # Try fast 'c' engine first (only reads header)
+                df_header = pd.read_csv(
+                    path,
+                    engine="c",
+                    nrows=0,  # Only read header
+                    on_bad_lines="skip"
+                )
+            except Exception:
+                # Fallback to 'python' engine if 'c' fails
+                df_header = pd.read_csv(
+                    path,
+                    engine="python",
+                    nrows=0,  # Only read header
+                    on_bad_lines="skip"
+                )
             
             # Get channel columns (exclude metadata columns starting with "#" and unnamed columns)
-            channel_cols = [col for col in df_full.columns 
+            channel_cols = [col for col in df_header.columns 
                            if col and not str(col).startswith("#") 
                            and not str(col).strip() == ""
                            and not str(col).startswith("Unnamed")]
@@ -3031,6 +3620,10 @@ class MainWindow(QtWidgets.QMainWindow):
             
             self.available_channels = channel_cols
             self.current_csv_path = path
+            # Clear cache when loading new file
+            if hasattr(self, 'two_plot') and self.two_plot:
+                self.two_plot._cached_csv_data = None
+                self.two_plot._cached_csv_path = None
             
             # Update MultiSelectCombo widgets with available channels
             self.combo_csv_plot1.set_items(channel_cols)
@@ -3072,13 +3665,34 @@ class MainWindow(QtWidgets.QMainWindow):
         # Generate titles automatically from selected channels
         t1 = channels1 if channels1 else None
         t2 = channels2 if channels2 else None
+
+        # Get downsampling factor from dropdown
+        downsample_factor = self.csv_downsample_combo.currentData()
+        if downsample_factor is None:
+            downsample_factor = 1
         
+        # Debug: verify downsample_factor from dropdown
+        print(f"DEBUG: _plot_csv_path: dropdown currentData = {self.csv_downsample_combo.currentData()}, using downsample_factor = {downsample_factor}")
+
         linkx = self.linkx_chk.isChecked()
         try:
-            self.two_plot.plot_csv(path, g1, g2, t1, t2, linkx)
+            self.two_plot.plot_csv(path, g1, g2, t1, t2, linkx, downsample_factor)
             self._set_status(f"Opened: {os.path.basename(path)} ✅")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "CSV", f"Failed to plot:\n{e}")
+    
+    def _on_downsample_changed(self):
+        """Called when downsampling factor changes - reload CSV with new factor."""
+        if self.current_csv_path:
+            # Don't clear cache when switching to x1 - we need it for selective loading
+            # Only clear if switching away from x1 to higher downsample
+            downsample_factor = self.csv_downsample_combo.currentData()
+            if downsample_factor and downsample_factor > 1:
+                # Switching to higher downsample - clear cache
+                self.two_plot._cached_csv_data = None
+                self.two_plot._cached_csv_path = None
+            # Reload and replot
+            self._plot_csv_path(self.current_csv_path)
 
 
     # ---------------- Logging (shared port) ----------------
@@ -3214,67 +3828,111 @@ class MainWindow(QtWidgets.QMainWindow):
                 v = 0
             values[name] = v
 
-        # Highlights values (plain text)
-        def set_lbl(name, fmt=None):
-            if name in self.hl_vals and name in values:
-                v = values[name]
-                self.hl_vals[name].setText(str(v) if fmt is None else fmt.format(v))
-        set_lbl("motor_rpm")
-        set_lbl("trq_ref", "{:.1f}")
-        set_lbl("trq_actual", "{:.1f}")
-        set_lbl("Vdc", "{:.1f}")
-        set_lbl("motor_temp", "{:.1f}")
-        set_lbl("igbt_temp", "{:.1f}")
-
-        # (6) Highlight threshold logic → orange
-        self._update_highlight_colors(values)
-
-        # Numeric monitor cells (3-decimal formatting for floats)
-        for k, w in self.mon_num_vars.items():
-            if k not in values:
-                continue
-
-            val = values[k]
-            try:
-                if isinstance(val, (int, np.integer)):
-                    txt = str(val)
-                elif isinstance(val, float):
-                    txt = f"{val:.3f}".rstrip("0").rstrip(".")
-                else:
-                    fv = float(val)
-                    txt = f"{fv:.3f}".rstrip("0").rstrip(".")
-            except Exception:
-                txt = str(val)
-
-            w.setText(txt)
-            w.setCursorPosition(0)
-
-        # Decoded text split into two columns
-        lines = []
-        if "critical_hw_status" in values: lines.append(f"critical_hw_status: {fmt_crit(int(values['critical_hw_status']))}")
-        if "aux_hw_status" in values:      lines.append(f"aux_hw_status: {fmt_bits(int(values['aux_hw_status']), [(0,'HW_TSAL_OVER60'),(1,'HW_DISCHARGE_ENABLED'),(2,'HW_USB_CONNECTED'),(3,'HW_ST_LINK_CONNECTED')])}")
-        if "last_error" in values:         lines.append(f"last_error: {enum_name(ERRORS_MAP, values['last_error'])}")
-        if "sys_status" in values:         lines.append(f"sys_status: {enum_name(ERRORS_MAP, values['sys_status'])}")
-        if "handler_status" in values:     lines.append(f"handler_status: {enum_name(ERRORTYPE_MAP, values['handler_status'])}")
-        if "latched_error" in values:      lines.append(f"latched_error: {enum_name(LATCHED_MAP, values['latched_error'])}")
-        if "actual_state" in values:       lines.append(f"actual_state: {enum_name(STATE_MAP, values['actual_state'])}")
-        if "control_mode_actual" in values:lines.append(f"control_mode_actual: {enum_name(CTRL_MODE_MAP, values['control_mode_actual'])}")
-
-        half = (len(lines)+1)//2
-        self.status_text1.setPlainText("\n".join(lines[:half]) if lines else "")
-        self.status_text2.setPlainText("\n".join(lines[half:]) if lines else "")
-
-        # --- Update limiter flag indicators ---
-        lf_val = int(values.get("limiter_flags", 0))
-        for bit, name in LIMITER_FLAG_BITS:
-            active = bool(lf_val & (1 << bit))
-            if name in self.limiter_bits:
-                self.limiter_bits[name].setActive(active)
-
-        # Live plot buffers & draw
-        self._update_live_plots(values)
-
+        # Store latest values for deferred updates
+        self._pending_diag_values = dict(values)
         self._last_diag_values = dict(values)
+        
+        # Throttle live plot updates separately (they can handle higher rates)
+        self._pending_live_plot_values = dict(values)
+        if not self._live_plot_timer.isActive():
+            # Update plots immediately and start timer
+            self._apply_pending_live_plot_update()
+            self._live_plot_timer.start(self._live_plot_update_interval_ms)
+        
+        # Throttle UI updates: if timer not running, start it; otherwise just update pending values
+        if not self._diag_update_timer.isActive():
+            # Apply immediately and start timer for next update
+            self._apply_pending_diag_update()
+            self._diag_update_timer.start(self._diag_update_interval_ms)
+
+    def _apply_pending_diag_update(self):
+        """Apply pending DIAG status updates to UI (called by throttled timer)."""
+        if self._pending_diag_values is None:
+            return
+        
+        values = self._pending_diag_values
+        
+        # Disable widget updates during bulk changes for better performance
+        widgets_to_update = []
+        if hasattr(self, 'hl_vals'):
+            widgets_to_update.extend(self.hl_vals.values())
+        if hasattr(self, 'mon_num_vars'):
+            widgets_to_update.extend(self.mon_num_vars.values())
+        if hasattr(self, 'status_text1'):
+            widgets_to_update.append(self.status_text1)
+        if hasattr(self, 'status_text2'):
+            widgets_to_update.append(self.status_text2)
+        
+        for w in widgets_to_update:
+            w.setUpdatesEnabled(False)
+        
+        try:
+            # Highlights values (plain text)
+            def set_lbl(name, fmt=None):
+                if name in self.hl_vals and name in values:
+                    v = values[name]
+                    self.hl_vals[name].setText(str(v) if fmt is None else fmt.format(v))
+            set_lbl("motor_rpm")
+            set_lbl("trq_ref", "{:.1f}")
+            set_lbl("trq_actual", "{:.1f}")
+            set_lbl("Vdc", "{:.1f}")
+            set_lbl("motor_temp", "{:.1f}")
+            set_lbl("igbt_temp", "{:.1f}")
+
+            # (6) Highlight threshold logic → orange
+            self._update_highlight_colors(values)
+
+            # Numeric monitor cells (3-decimal formatting for floats)
+            for k, w in self.mon_num_vars.items():
+                if k not in values:
+                    continue
+
+                val = values[k]
+                try:
+                    if isinstance(val, (int, np.integer)):
+                        txt = str(val)
+                    elif isinstance(val, float):
+                        txt = f"{val:.3f}".rstrip("0").rstrip(".")
+                    else:
+                        fv = float(val)
+                        txt = f"{fv:.3f}".rstrip("0").rstrip(".")
+                except Exception:
+                    txt = str(val)
+
+                w.setText(txt)
+                w.setCursorPosition(0)
+
+            # Decoded text split into two columns (only update if changed)
+            lines = []
+            if "critical_hw_status" in values: lines.append(f"critical_hw_status: {fmt_crit(int(values['critical_hw_status']))}")
+            if "aux_hw_status" in values:      lines.append(f"aux_hw_status: {fmt_bits(int(values['aux_hw_status']), [(0,'HW_TSAL_OVER60'),(1,'HW_DISCHARGE_ENABLED'),(2,'HW_USB_CONNECTED'),(3,'HW_ST_LINK_CONNECTED')])}")
+            if "last_error" in values:         lines.append(f"last_error: {enum_name(ERRORS_MAP, values['last_error'])}")
+            if "sys_status" in values:         lines.append(f"sys_status: {enum_name(ERRORS_MAP, values['sys_status'])}")
+            if "handler_status" in values:     lines.append(f"handler_status: {enum_name(ERRORTYPE_MAP, values['handler_status'])}")
+            if "latched_error" in values:      lines.append(f"latched_error: {enum_name(LATCHED_MAP, values['latched_error'])}")
+            if "actual_state" in values:       lines.append(f"actual_state: {enum_name(STATE_MAP, values['actual_state'])}")
+            if "control_mode_actual" in values:lines.append(f"control_mode_actual: {enum_name(CTRL_MODE_MAP, values['control_mode_actual'])}")
+
+            half = (len(lines)+1)//2
+            text1 = "\n".join(lines[:half]) if lines else ""
+            text2 = "\n".join(lines[half:]) if lines else ""
+            
+            # Only update status text if it changed
+            if (text1, text2) != self._last_status_text:
+                self.status_text1.setPlainText(text1)
+                self.status_text2.setPlainText(text2)
+                self._last_status_text = (text1, text2)
+
+            # --- Update limiter flag indicators ---
+            lf_val = int(values.get("limiter_flags", 0))
+            for bit, name in LIMITER_FLAG_BITS:
+                active = bool(lf_val & (1 << bit))
+                if name in self.limiter_bits:
+                    self.limiter_bits[name].setActive(active)
+        finally:
+            # Re-enable updates and trigger repaint
+            for w in widgets_to_update:
+                w.setUpdatesEnabled(True)
 
     def _update_highlight_colors(self, values: dict):
         # --- Build styles based on current palette/theme ---
@@ -3330,6 +3988,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._color_map[name] = pg.intColor(len(self._color_map))
         return self._color_map[name]
 
+    def _apply_pending_live_plot_update(self):
+        """Apply pending live plot updates (called by throttled timer)."""
+        if self._pending_live_plot_values is None:
+            return
+        self._update_live_plots(self._pending_live_plot_values)
+
     def _update_live_plots(self, values: dict):
         # If plots not built yet, bail out gracefully
         if not hasattr(self, "combo_plot1") or self.combo_plot1 is None:
@@ -3345,35 +4009,44 @@ class MainWindow(QtWidgets.QMainWindow):
         names1 = self.combo_plot1.checked_items()
         names2 = self.combo_plot2.checked_items()
 
-        def ensure_curves(names, plotw, curves_dict):
-            for k in list(curves_dict):
-                if k not in names:
-                    plotw.removeItem(curves_dict[k])
-                    del curves_dict[k]
-            for name in names:
-                if name not in curves_dict:
-                    pen = self._color_for(name)
-                    curves_dict[name] = plotw.plot(name=name, pen=pen)
+        # Only update curve management if selection changed (expensive operation)
+        all_names = set(names1 + names2)
+        existing_curves = set(list(self.live_curves1.keys()) + list(self.live_curves2.keys()))
+        if all_names != existing_curves:
+            def ensure_curves(names, plotw, curves_dict):
+                for k in list(curves_dict):
+                    if k not in names:
+                        plotw.removeItem(curves_dict[k])
+                        del curves_dict[k]
+                for name in names:
+                    if name not in curves_dict:
+                        pen = self._color_for(name)
+                        curves_dict[name] = plotw.plot(name=name, pen=pen)
 
-        ensure_curves(names1, self.live_plot1, self.live_curves1)
-        ensure_curves(names2, self.live_plot2, self.live_curves2)
+            ensure_curves(names1, self.live_plot1, self.live_curves1)
+            ensure_curves(names2, self.live_plot2, self.live_curves2)
 
+        # Append new values to buffers
         for n in names1 + names2:
             if n in values:
                 self.live_buf[n].append(values[n])
 
-        x = np.fromiter(self.live_time, dtype=float)
-        for n, curve in self.live_curves1.items():
-            y = np.fromiter(self.live_buf[n], dtype=float) if n in self.live_buf else np.array([])
-            if len(y) > 2:
-                curve.setData(x[-len(y):], y)
-        for n, curve in self.live_curves2.items():
-            y = np.fromiter(self.live_buf[n], dtype=float) if n in self.live_buf else np.array([])
-            if len(y) > 2:
-                curve.setData(x[-len(y):], y)
+        # Update plot data (only if we have data)
+        if len(self.live_time) > 2:
+            x = np.fromiter(self.live_time, dtype=float)
+            for n, curve in self.live_curves1.items():
+                if n in self.live_buf and len(self.live_buf[n]) > 2:
+                    y = np.fromiter(self.live_buf[n], dtype=float)
+                    curve.setData(x[-len(y):], y)
+            for n, curve in self.live_curves2.items():
+                if n in self.live_buf and len(self.live_buf[n]) > 2:
+                    y = np.fromiter(self.live_buf[n], dtype=float)
+                    curve.setData(x[-len(y):], y)
 
-        self.vb1.enableAutoRange(x=True, y=True)
-        self.vb2.enableAutoRange(x=True, y=True)
+            # Auto-range (only if we have curves)
+            if self.live_curves1 or self.live_curves2:
+                self.vb1.enableAutoRange(x=True, y=True)
+                self.vb2.enableAutoRange(x=True, y=True)
 
     # ---------------- Helpers ----------------
     def _ensure_open(self) -> bool:
