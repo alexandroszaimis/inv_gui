@@ -1726,6 +1726,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.csv_request_data = None  # List of (time, request) tuples
         self.csv_request_start_time = None  # Time when CSV playback started
         self.csv_request_path = None  # Path to loaded CSV file
+        self.csv_sequence_finished = False  # Flag to track if sequence has finished
+        self.csv_sequence_started = False  # Flag to track if sequence was explicitly started
 
         # ============ Live plot buffers ============
         self.live_max_samples = 500  # default window size (adjustable)
@@ -2929,8 +2931,14 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------------- CSV Request Profile ----------------
     def _load_request_csv(self):
         """Load CSV file with time,request columns for request profile."""
+        # Default to input_reference folder (relative to script directory)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        input_ref_dir = os.path.join(script_dir, "input_reference")
+        # Use input_reference if it exists, otherwise use current directory
+        default_dir = input_ref_dir if os.path.isdir(input_ref_dir) else ""
+        
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Load Request CSV", "", "CSV (*.csv)"
+            self, "Load Request CSV", default_dir, "CSV (*.csv)"
         )
         if not path:
             return
@@ -2980,8 +2988,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.csv_request_label.setText(f"Loaded: {filename} ({len(self.csv_request_data)} points)")
             self.csv_request_label.setStyleSheet("color: #0066cc; font-weight: bold;")
             
-            # Reset start time (will be set when periodic send starts)
+            # Update value display to show first value or "Ready"
+            if hasattr(self, 'csv_request_value_label'):
+                if len(self.csv_request_data) > 0:
+                    first_value = int(self.csv_request_data[0][1])
+                    self.csv_request_value_label.setText(str(first_value))
+                else:
+                    self.csv_request_value_label.setText("Ready")
+                self.csv_request_value_label.setStyleSheet("color: #0066cc; font-weight: bold; min-width: 80px;")
+            
+            # Reset start time, finished flag, and started flag
             self.csv_request_start_time = None
+            self.csv_sequence_finished = False
+            self.csv_sequence_started = False
+            
+            # Enable start button
+            if hasattr(self, 'csv_start_btn'):
+                self.csv_start_btn.setEnabled(True)
             
             self._set_status(f"Request CSV loaded: {filename} ✅")
             
@@ -2991,14 +3014,83 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Failed to load CSV:\n{e}"
             )
     
+    def _start_csv_sequence(self):
+        """Start/reset or stop the CSV sequence playback."""
+        if self.csv_request_data is None or len(self.csv_request_data) == 0:
+            QtWidgets.QMessageBox.warning(
+                self, "CSV Error",
+                "No CSV loaded. Please load a CSV file first."
+            )
+            return
+        
+        # If already started, stop it and set request to 0
+        if self.csv_sequence_started:
+            self.csv_sequence_started = False
+            self.csv_request_start_time = None
+            self.csv_sequence_finished = False
+            
+            # Set request value to 0
+            mode = int(self.ctrl_mode.currentData())
+            if mode == 1:  # SPEED CONTROL
+                self.ctrl_velocity_req.blockSignals(True)
+                self.ctrl_velocity_req.setValue(0)
+                self.ctrl_velocity_req.blockSignals(False)
+                self._ctrl_vals["velocity_req"] = 0
+            elif mode == 2:  # TORQUE CONTROL
+                self.ctrl_torque_req.blockSignals(True)
+                self.ctrl_torque_req.setValue(0)
+                self.ctrl_torque_req.blockSignals(False)
+                self._ctrl_vals["torque_req"] = 0
+            
+            # Update label
+            filename = os.path.basename(self.csv_request_path) if self.csv_request_path else "CSV"
+            self.csv_request_label.setText(f"Stopped: {filename}")
+            self.csv_request_label.setStyleSheet("color: #666; font-weight: normal;")
+            
+            # Update value display to show 0
+            if hasattr(self, 'csv_request_value_label'):
+                self.csv_request_value_label.setText("0")
+                self.csv_request_value_label.setStyleSheet("color: #666; font-weight: normal; min-width: 80px;")
+            
+            self._set_status("CSV sequence stopped ✅")
+            return
+        
+        # Start/reset the sequence
+        # Reset start time and finished flag, mark as started
+        self.csv_request_start_time = None
+        self.csv_sequence_finished = False
+        self.csv_sequence_started = True
+        
+        # Update label
+        filename = os.path.basename(self.csv_request_path) if self.csv_request_path else "CSV"
+        self.csv_request_label.setText(f"Playing: {filename} ({len(self.csv_request_data)} points)")
+        self.csv_request_label.setStyleSheet("color: #00aa00; font-weight: bold;")
+        
+        # Update value display to show first value
+        if hasattr(self, 'csv_request_value_label') and len(self.csv_request_data) > 0:
+            first_value = int(self.csv_request_data[0][1])
+            self.csv_request_value_label.setText(str(first_value))
+            self.csv_request_value_label.setStyleSheet("color: #00aa00; font-weight: bold; min-width: 80px;")
+        
+        self._set_status("CSV sequence started ✅")
+    
     def _get_csv_request_value(self):
         """Get current request value from CSV based on elapsed time.
-        Returns None if CSV not loaded or periodic send not active.
+        Returns the exact CSV value for the current time point (no interpolation).
+        Returns None if CSV not loaded, periodic send not active, or sequence not started.
         """
         if self.csv_request_data is None or len(self.csv_request_data) == 0:
             return None
         
         if not self.periodic_timer.isActive():
+            return None
+        
+        # Only return values if sequence was explicitly started
+        if not self.csv_sequence_started:
+            return None
+        
+        # If sequence already finished, don't return values
+        if self.csv_sequence_finished:
             return None
         
         # Initialize start time on first call
@@ -3008,7 +3100,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Calculate elapsed time
         elapsed_time = time.monotonic() - self.csv_request_start_time
         
-        # Find the appropriate value by interpolating
+        # Find the exact value - use the CSV value for the time point we're at
         times = [t for t, _ in self.csv_request_data]
         requests = [r for _, r in self.csv_request_data]
         
@@ -3016,20 +3108,31 @@ class MainWindow(QtWidgets.QMainWindow):
         if elapsed_time <= times[0]:
             return requests[0]
         
-        # If after last time point, use last value
+        # If after last time point, sequence finished
         if elapsed_time >= times[-1]:
-            return requests[-1]
+            if not self.csv_sequence_finished:
+                self.csv_sequence_finished = True
+                filename = os.path.basename(self.csv_request_path) if self.csv_request_path else "CSV"
+                self.csv_request_label.setText(f"Sequence finished: {filename}")
+                self.csv_request_label.setStyleSheet("color: #ff6600; font-weight: bold;")
+                # Update value display
+                if hasattr(self, 'csv_request_value_label'):
+                    self.csv_request_value_label.setText("Finished")
+                    self.csv_request_value_label.setStyleSheet("color: #ff6600; font-weight: bold; min-width: 80px;")
+                self._set_status("CSV sequence finished ✅")
+            return requests[-1]  # Return last value
         
-        # Interpolate between two points
+        # Find the closest time point (use the previous point's value, not interpolate)
+        # This gives step-like behavior matching the CSV exactly
         for i in range(len(times) - 1):
-            if times[i] <= elapsed_time <= times[i + 1]:
-                # Linear interpolation
-                t1, r1 = times[i], requests[i]
-                t2, r2 = times[i + 1], requests[i + 1]
-                if t2 == t1:
-                    return r1
-                ratio = (elapsed_time - t1) / (t2 - t1)
-                return r1 + ratio * (r2 - r1)
+            if times[i] <= elapsed_time < times[i + 1]:
+                # Use the value from the current time point (no interpolation)
+                return requests[i]
+        
+        # If exactly at a time point
+        for i in range(len(times)):
+            if abs(elapsed_time - times[i]) < 0.001:  # Small tolerance for floating point
+                return requests[i]
         
         return requests[-1]  # Fallback
     
@@ -3288,6 +3391,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # Apply CSV request if available and periodic send is active
         csv_request_value = self._get_csv_request_value()
         if csv_request_value is not None:
+            # Update display label
+            if hasattr(self, 'csv_request_value_label'):
+                self.csv_request_value_label.setText(str(int(csv_request_value)))
+                self.csv_request_value_label.setStyleSheet("color: #00aa00; font-weight: bold; min-width: 80px;")
+            
             mode = int(self.ctrl_mode.currentData())
             if mode == 1:  # SPEED CONTROL
                 self._ctrl_vals["velocity_req"] = int(csv_request_value)
@@ -3302,6 +3410,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ctrl_torque_req.setValue(int(csv_request_value))
                 self.ctrl_torque_req.blockSignals(False)
         else:
+            # Update display label to show N/A or widget value
+            if hasattr(self, 'csv_request_value_label'):
+                if self.csv_sequence_started and self.csv_sequence_finished:
+                    self.csv_request_value_label.setText("Finished")
+                    self.csv_request_value_label.setStyleSheet("color: #ff6600; font-weight: bold; min-width: 80px;")
+                elif self.csv_request_data is not None and not self.csv_sequence_started:
+                    # CSV loaded but not started - show first value or N/A
+                    self.csv_request_value_label.setText("Ready")
+                    self.csv_request_value_label.setStyleSheet("color: #0066cc; font-weight: bold; min-width: 80px;")
+                else:
+                    # No CSV or not active - show widget value
+                    mode = int(self.ctrl_mode.currentData())
+                    if mode == 1:  # SPEED CONTROL
+                        val = self.ctrl_velocity_req.value()
+                    elif mode == 2:  # TORQUE CONTROL
+                        val = self.ctrl_torque_req.value()
+                    else:
+                        val = "N/A"
+                    self.csv_request_value_label.setText(str(val) if val != "N/A" else "N/A")
+                    self.csv_request_value_label.setStyleSheet("color: #666; font-weight: normal; min-width: 80px;")
+            
             # Use widget values
             self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
             self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
@@ -3320,12 +3449,38 @@ class MainWindow(QtWidgets.QMainWindow):
         # Apply CSV request if available and periodic send is active
         csv_request_value = self._get_csv_request_value()
         if csv_request_value is not None:
+            # Update display label
+            if hasattr(self, 'csv_request_value_label'):
+                self.csv_request_value_label.setText(str(int(csv_request_value)))
+                self.csv_request_value_label.setStyleSheet("color: #00aa00; font-weight: bold; min-width: 80px;")
+            
             mode = int(self.ctrl_mode.currentData())
             if mode == 1:  # SPEED CONTROL
                 self._ctrl_vals["velocity_req"] = int(csv_request_value)
             elif mode == 2:  # TORQUE CONTROL
                 self._ctrl_vals["torque_req"] = int(csv_request_value)
         else:
+            # Update display label to show N/A or widget value
+            if hasattr(self, 'csv_request_value_label'):
+                if self.csv_sequence_started and self.csv_sequence_finished:
+                    self.csv_request_value_label.setText("Finished")
+                    self.csv_request_value_label.setStyleSheet("color: #ff6600; font-weight: bold; min-width: 80px;")
+                elif self.csv_request_data is not None and not self.csv_sequence_started:
+                    # CSV loaded but not started - show first value or N/A
+                    self.csv_request_value_label.setText("Ready")
+                    self.csv_request_value_label.setStyleSheet("color: #0066cc; font-weight: bold; min-width: 80px;")
+                else:
+                    # No CSV or not active - show widget value
+                    mode = int(self.ctrl_mode.currentData())
+                    if mode == 1:  # SPEED CONTROL
+                        val = self.ctrl_velocity_req.value()
+                    elif mode == 2:  # TORQUE CONTROL
+                        val = self.ctrl_torque_req.value()
+                    else:
+                        val = "N/A"
+                    self.csv_request_value_label.setText(str(val) if val != "N/A" else "N/A")
+                    self.csv_request_value_label.setStyleSheet("color: #666; font-weight: normal; min-width: 80px;")
+            
             # Use widget values
             self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
             self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
@@ -3450,6 +3605,16 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_load_csv = QtWidgets.QPushButton("Load Request CSV...")
         btn_load_csv.clicked.connect(self._load_request_csv)
         csv_layout.addWidget(btn_load_csv)
+        btn_start_csv = QtWidgets.QPushButton("Start")
+        btn_start_csv.clicked.connect(self._start_csv_sequence)
+        btn_start_csv.setEnabled(False)  # Disabled until CSV is loaded
+        self.csv_start_btn = btn_start_csv  # Store reference
+        csv_layout.addWidget(btn_start_csv)
+        # Display for current request value
+        csv_layout.addWidget(QtWidgets.QLabel("Request:"))
+        self.csv_request_value_label = QtWidgets.QLabel("N/A")
+        self.csv_request_value_label.setStyleSheet("color: #0066cc; font-weight: bold; min-width: 80px;")
+        csv_layout.addWidget(self.csv_request_value_label)
         self.csv_request_label = QtWidgets.QLabel("No CSV loaded")
         self.csv_request_label.setStyleSheet("color: #666; font-style: italic;")
         csv_layout.addWidget(self.csv_request_label)
@@ -3582,6 +3747,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.live_plot2.addLegend()
         self.vb2 = self.live_plot2.getViewBox()
         self.vb2.enableAutoRange(x=True, y=True)
+        
+        # Link x-axis of plot2 to plot1 (so zooming/panning x-axis affects both)
+        self.live_plot2.setXLink(self.live_plot1)
 
         pv2.addWidget(self.live_plot1)
         pv2.addWidget(self.live_plot2)
