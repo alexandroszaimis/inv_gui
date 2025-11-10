@@ -25,6 +25,12 @@ import serial
 from serial.tools import list_ports
 import numpy as np
 import pandas as pd
+try:
+    import polars as pl
+    POLARS_AVAILABLE = True
+except ImportError:
+    POLARS_AVAILABLE = False
+    pl = None
 
 # Favor speed over prettiness
 pg.setConfigOptions(antialias=False)      # fastest line rendering
@@ -196,15 +202,16 @@ ENUM_MAP_BY_NAME = {
 # LOG_TABLE variables (from firmware LOG_TABLE array, in order)
 # Format: (name, type) where type is: "f32"/"f64" (scaled+signed), "i16" (signed, no scale), "u16" (unsigned, no scale)
 LOG_TABLE_VARIABLES = [
-    ("TIME_16US", "u16"),      # 0
-    ("TIME_16MS", "u16"),      # 1
+    ("TIME_16US", "u16"),      
+    ("TIME_16MS", "u16"),     
     ("msg_cnt", "u16"),
-    ("Id_ref", "f32"),         # 2
-    ("Iq_ref", "f32"),         # 3
-    ("Id", "f32"),             # 4
-    ("Iq", "f32"),             # 5
-    ("foc_psi_ref", "f32"),        # 6
-    ("foc_trq_ref", "f32"),        # 7
+    ("msg_toggle", "u16"),
+    ("Id_ref", "f32"),         
+    ("Iq_ref", "f32"),        
+    ("Id", "f32"),             
+    ("Iq", "f32"),            
+    ("foc_psi_ref", "f32"),      
+    ("foc_trq_ref", "f32"),     
     ("trq_actual", "f32"), 
     ("foc_psi_actual", "f32"), 
     ("dtc_psi_ref", "f32"),       
@@ -216,7 +223,8 @@ LOG_TABLE_VARIABLES = [
     ("Ia_ph", "f32"),         
     ("Ib_ph", "f32"),         
     ("pwr_ref", "f32"),       
-    ("pwr_actual", "f32"),    
+    ("pwr_actual", "f32"), 
+    ("velocity_request", "i16"),   
     ("motor_rpm", "i16"),
     ("motor_rpm_actual", "i16"),       
     ("Vdc", "f32"),
@@ -890,7 +898,116 @@ class CSVLoaderThread(QtCore.QThread):
         return self._load_full_csv()
     
     def _load_full_csv(self):
-        """Load full CSV with downsampling."""
+        """Load full CSV with downsampling using Polars (faster and more memory-efficient)."""
+        import numpy as np
+        
+        # Use Polars if available, fallback to pandas
+        if POLARS_AVAILABLE:
+            print("DEBUG: Using Polars for CSV loading")
+            return self._load_full_csv_polars()
+        else:
+            print("DEBUG: Using Pandas for CSV loading (Polars not available)")
+            return self._load_full_csv_pandas()
+    
+    def _load_full_csv_polars(self):
+        """Load full CSV with downsampling using Polars."""
+        import numpy as np
+        
+        # Read header to get column names
+        try:
+            df_header = pl.read_csv(
+                self.csv_path,
+                n_rows=0,
+                ignore_errors=True,
+                truncate_ragged_lines=True
+            )
+        except Exception as e:
+            # Fallback to pandas if polars fails
+            print(f"DEBUG: Polars failed ({e}), falling back to Pandas")
+            return self._load_full_csv_pandas()
+        
+        all_channel_cols = [col for col in df_header.columns 
+                           if col and not str(col).startswith("#") 
+                           and not str(col).strip() == ""
+                           and not str(col).startswith("Unnamed")
+                           and not str(col).startswith("_duplicated_")]
+        
+        if not all_channel_cols:
+            raise ValueError("No channel columns found in CSV.")
+        
+        cols_to_read = [col for col in self.needed_channels if col in all_channel_cols]
+        if not cols_to_read:
+            raise ValueError(f"None of the selected channels found in CSV. Available: {all_channel_cols[:10]}...")
+        
+        # Polars: use scan_csv for lazy evaluation (memory efficient) or read_csv for eager
+        downsample = int(self.downsample_factor)
+        
+        if self.downsample_factor > 1:
+            # Use lazy evaluation with scan_csv for chunked processing
+            try:
+                # Read CSV lazily and filter rows
+                lazy_df = pl.scan_csv(
+                    self.csv_path,
+                    ignore_errors=True,
+                    truncate_ragged_lines=True
+                ).select(cols_to_read)
+                
+                # Add row number column for downsampling
+                lazy_df = lazy_df.with_row_index("__row_idx")
+                
+                # Filter: keep rows where row_idx % downsample_factor == 0
+                lazy_df = lazy_df.filter(
+                    pl.col("__row_idx") % downsample == 0
+                ).drop("__row_idx")
+                
+                # Collect (execute) and convert to pandas for compatibility
+                df_polars = lazy_df.collect()
+                
+                # Convert to pandas DataFrame for compatibility with existing code
+                df = df_polars.to_pandas()
+                
+                # Debug: verify downsample_factor is correct
+                if len(df) > 0:
+                    print(f"DEBUG: CSVLoaderThread.downsample_factor = {self.downsample_factor}, using downsample = {downsample}")
+                    expected_pattern = list(range(0, min(20, len(df)), downsample))
+                    print(f"DEBUG: Expected pattern for x{downsample}: {expected_pattern}")
+                    actual_rows = df.index[:10].tolist()
+                    print(f"DEBUG: Actual kept rows (first 10): {actual_rows}")
+                
+            except Exception as e:
+                # Fallback to pandas if polars fails
+                print(f"DEBUG: Polars failed ({e}), falling back to Pandas")
+                return self._load_full_csv_pandas()
+        else:
+            # No downsampling - read normally
+            try:
+                df_polars = pl.read_csv(
+                    self.csv_path,
+                    columns=cols_to_read,
+                    ignore_errors=True,
+                    truncate_ragged_lines=True
+                )
+                # Convert to pandas DataFrame for compatibility
+                df = df_polars.to_pandas()
+            except Exception as e:
+                # Fallback to pandas if polars fails
+                print(f"DEBUG: Polars failed ({e}), falling back to Pandas")
+                return self._load_full_csv_pandas()
+        
+        # Convert to numeric in-place to save memory
+        for col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce", downcast='float')
+        df = df.dropna(how="all")
+        
+        # Ensure all columns are float32 (downcast might not work for all)
+        for col in df.columns:
+            if df[col].dtype == 'float64':
+                df[col] = df[col].astype('float32', copy=False)
+        
+        return df
+    
+    def _load_full_csv_pandas(self):
+        """Load full CSV with downsampling using pandas (fallback)."""
         import pandas as pd
         import numpy as np
         
@@ -913,7 +1030,8 @@ class CSVLoaderThread(QtCore.QThread):
         all_channel_cols = [col for col in df_header.columns 
                            if col and not str(col).startswith("#") 
                            and not str(col).strip() == ""
-                           and not str(col).startswith("Unnamed")]
+                           and not str(col).startswith("Unnamed")
+                           and not str(col).startswith("_duplicated_")]
         
         if not all_channel_cols:
             raise ValueError("No channel columns found in CSV.")
@@ -1295,20 +1413,23 @@ class TwoWindowPlot(QtWidgets.QWidget):
                     # Read only missing channels and merge with cache
                     try:
                         # Read header to verify channels exist
-                        try:
-                            df_header = pd.read_csv(
-                                csv_path,
-                                engine="c",
-                                nrows=0,
-                                on_bad_lines="skip"
-                            )
-                        except Exception:
-                            df_header = pd.read_csv(
-                                csv_path,
-                                engine="python",
-                                nrows=0,
-                                on_bad_lines="skip"
-                            )
+                        if POLARS_AVAILABLE:
+                            try:
+                                print("DEBUG: Using Polars for CSV header reading (cache merge)")
+                                df_header_polars = pl.read_csv(csv_path, n_rows=0, ignore_errors=True, truncate_ragged_lines=True)
+                                df_header = df_header_polars.to_pandas()  # Convert to pandas for compatibility
+                            except Exception as e:
+                                print(f"DEBUG: Polars header read failed ({e}), falling back to Pandas")
+                                try:
+                                    df_header = pd.read_csv(csv_path, engine="c", nrows=0, on_bad_lines="skip")
+                                except Exception:
+                                    df_header = pd.read_csv(csv_path, engine="python", nrows=0, on_bad_lines="skip")
+                        else:
+                            print("DEBUG: Using Pandas for CSV header reading (cache merge, Polars not available)")
+                            try:
+                                df_header = pd.read_csv(csv_path, engine="c", nrows=0, on_bad_lines="skip")
+                            except Exception:
+                                df_header = pd.read_csv(csv_path, engine="python", nrows=0, on_bad_lines="skip")
                         
                         # Verify missing channels exist in CSV
                         available_cols = set(df_header.columns)
@@ -1600,6 +1721,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pending_live_plot_values = None
         self._live_plot_update_interval_ms = 33  # Update plots at most every 33ms (~30 Hz)
         self._last_status_text = ("", "")  # Cache status text to avoid unnecessary updates
+        
+        # ============ CSV request profile ============
+        self.csv_request_data = None  # List of (time, request) tuples
+        self.csv_request_start_time = None  # Time when CSV playback started
+        self.csv_request_path = None  # Path to loaded CSV file
 
         # ============ Live plot buffers ============
         self.live_max_samples = 500  # default window size (adjustable)
@@ -2800,12 +2926,123 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_log_scales_from_recv()
         self._set_status("MCU → Current settings copied ✅")
 
+    # ---------------- CSV Request Profile ----------------
+    def _load_request_csv(self):
+        """Load CSV file with time,request columns for request profile."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Request CSV", "", "CSV (*.csv)"
+        )
+        if not path:
+            return
+        
+        try:
+            # Read CSV file
+            if POLARS_AVAILABLE:
+                try:
+                    df = pl.read_csv(path, ignore_errors=True, truncate_ragged_lines=True)
+                    df = df.to_pandas()
+                except Exception:
+                    df = pd.read_csv(path, engine="c", on_bad_lines="skip")
+            else:
+                df = pd.read_csv(path, engine="c", on_bad_lines="skip")
+            
+            # Verify required columns exist
+            if "time" not in df.columns or "request" not in df.columns:
+                QtWidgets.QMessageBox.warning(
+                    self, "CSV Error", 
+                    "CSV must contain 'time' and 'request' columns."
+                )
+                return
+            
+            # Extract time and request columns, convert to numeric
+            df["time"] = pd.to_numeric(df["time"], errors="coerce")
+            df["request"] = pd.to_numeric(df["request"], errors="coerce")
+            
+            # Remove NaN rows
+            df = df.dropna(subset=["time", "request"])
+            
+            if len(df) == 0:
+                QtWidgets.QMessageBox.warning(
+                    self, "CSV Error", 
+                    "No valid data found in CSV."
+                )
+                return
+            
+            # Sort by time
+            df = df.sort_values("time")
+            
+            # Store as list of tuples (time, request)
+            self.csv_request_data = list(zip(df["time"].values, df["request"].values))
+            self.csv_request_path = path
+            
+            # Update label
+            filename = os.path.basename(path)
+            self.csv_request_label.setText(f"Loaded: {filename} ({len(self.csv_request_data)} points)")
+            self.csv_request_label.setStyleSheet("color: #0066cc; font-weight: bold;")
+            
+            # Reset start time (will be set when periodic send starts)
+            self.csv_request_start_time = None
+            
+            self._set_status(f"Request CSV loaded: {filename} ✅")
+            
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self, "CSV Error", 
+                f"Failed to load CSV:\n{e}"
+            )
+    
+    def _get_csv_request_value(self):
+        """Get current request value from CSV based on elapsed time.
+        Returns None if CSV not loaded or periodic send not active.
+        """
+        if self.csv_request_data is None or len(self.csv_request_data) == 0:
+            return None
+        
+        if not self.periodic_timer.isActive():
+            return None
+        
+        # Initialize start time on first call
+        if self.csv_request_start_time is None:
+            self.csv_request_start_time = time.monotonic()
+        
+        # Calculate elapsed time
+        elapsed_time = time.monotonic() - self.csv_request_start_time
+        
+        # Find the appropriate value by interpolating
+        times = [t for t, _ in self.csv_request_data]
+        requests = [r for _, r in self.csv_request_data]
+        
+        # If before first time point, use first value
+        if elapsed_time <= times[0]:
+            return requests[0]
+        
+        # If after last time point, use last value
+        if elapsed_time >= times[-1]:
+            return requests[-1]
+        
+        # Interpolate between two points
+        for i in range(len(times) - 1):
+            if times[i] <= elapsed_time <= times[i + 1]:
+                # Linear interpolation
+                t1, r1 = times[i], requests[i]
+                t2, r2 = times[i + 1], requests[i + 1]
+                if t2 == t1:
+                    return r1
+                ratio = (elapsed_time - t1) / (t2 - t1)
+                return r1 + ratio * (r2 - r1)
+        
+        return requests[-1]  # Fallback
+    
     # ---------------- Periodic control ----------------
     def _on_periodic_toggled(self, checked: bool):
         if checked:
             # fixed 50 ms period
             fixed_period = 50
             self.periodic_timer.setInterval(fixed_period)
+            
+            # Reset CSV start time when starting periodic send
+            if self.csv_request_data is not None:
+                self.csv_request_start_time = None
 
             if not self._ensure_open():
                 self._user_connect()
@@ -3047,8 +3284,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ctrl_vals["num_min_trq"]  = int(self.ctrl_num_min_trq.value())
         self._ctrl_vals["max_velocity"] = int(self.ctrl_max_velocity.value())
         self._ctrl_vals["min_velocity"] = int(self.ctrl_min_velocity.value())
-        self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
-        self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
+        
+        # Apply CSV request if available and periodic send is active
+        csv_request_value = self._get_csv_request_value()
+        if csv_request_value is not None:
+            mode = int(self.ctrl_mode.currentData())
+            if mode == 1:  # SPEED CONTROL
+                self._ctrl_vals["velocity_req"] = int(csv_request_value)
+                # Update widget to reflect CSV value
+                self.ctrl_velocity_req.blockSignals(True)
+                self.ctrl_velocity_req.setValue(int(csv_request_value))
+                self.ctrl_velocity_req.blockSignals(False)
+            elif mode == 2:  # TORQUE CONTROL
+                self._ctrl_vals["torque_req"] = int(csv_request_value)
+                # Update widget to reflect CSV value
+                self.ctrl_torque_req.blockSignals(True)
+                self.ctrl_torque_req.setValue(int(csv_request_value))
+                self.ctrl_torque_req.blockSignals(False)
+        else:
+            # Use widget values
+            self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
+            self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
+        
         self._ctrl_vals["mode"]         = int(self.ctrl_mode.currentData())
         self._ctrl_vals["inv_en"]       = 1 if self.ctrl_inverter_en.isChecked() else 0
 
@@ -3059,8 +3316,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ctrl_vals["num_min_trq"]  = int(self.ctrl_num_min_trq.value())
         self._ctrl_vals["max_velocity"] = int(self.ctrl_max_velocity.value())
         self._ctrl_vals["min_velocity"] = int(self.ctrl_min_velocity.value())
-        self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
-        self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
+        
+        # Apply CSV request if available and periodic send is active
+        csv_request_value = self._get_csv_request_value()
+        if csv_request_value is not None:
+            mode = int(self.ctrl_mode.currentData())
+            if mode == 1:  # SPEED CONTROL
+                self._ctrl_vals["velocity_req"] = int(csv_request_value)
+            elif mode == 2:  # TORQUE CONTROL
+                self._ctrl_vals["torque_req"] = int(csv_request_value)
+        else:
+            # Use widget values
+            self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
+            self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
+        
         # Mode/enable are already staged on change, but we refresh anyway:
         self._ctrl_vals["mode"]   = int(self.ctrl_mode.currentData())
         self._ctrl_vals["inv_en"] = 1 if self.ctrl_inverter_en.isChecked() else 0
@@ -3175,6 +3444,17 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_send_once = QtWidgets.QPushButton("Send Once Now")
         btn_send_once.clicked.connect(self._send_control_once)
         lv.addWidget(btn_send_once)
+        
+        # ---- CSV request profile ----
+        csv_layout = QtWidgets.QHBoxLayout()
+        btn_load_csv = QtWidgets.QPushButton("Load Request CSV...")
+        btn_load_csv.clicked.connect(self._load_request_csv)
+        csv_layout.addWidget(btn_load_csv)
+        self.csv_request_label = QtWidgets.QLabel("No CSV loaded")
+        self.csv_request_label.setStyleSheet("color: #666; font-style: italic;")
+        csv_layout.addWidget(self.csv_request_label)
+        csv_layout.addStretch()
+        lv.addLayout(csv_layout)
 
         self.log_btn = QtWidgets.QPushButton("LOG DATA")
         self.log_btn.clicked.connect(self._toggle_logging)
@@ -3591,28 +3871,34 @@ class MainWindow(QtWidgets.QMainWindow):
         """Load CSV, extract available channels, and update UI with MultiSelectCombo."""
         try:
             # Only read header row to get column names (much faster for large files)
-            try:
-                # Try fast 'c' engine first (only reads header)
-                df_header = pd.read_csv(
-                    path,
-                    engine="c",
-                    nrows=0,  # Only read header
-                    on_bad_lines="skip"
-                )
-            except Exception:
-                # Fallback to 'python' engine if 'c' fails
-                df_header = pd.read_csv(
-                    path,
-                    engine="python",
-                    nrows=0,  # Only read header
-                    on_bad_lines="skip"
-                )
+            if POLARS_AVAILABLE:
+                try:
+                    # Try Polars first (fastest)
+                    print("DEBUG: Using Polars for CSV header reading")
+                    df_header_polars = pl.read_csv(path, n_rows=0, ignore_errors=True, truncate_ragged_lines=True)
+                    df_header = df_header_polars.to_pandas()  # Convert to pandas for compatibility
+                except Exception as e:
+                    # Fallback to pandas
+                    print(f"DEBUG: Polars header read failed ({e}), falling back to Pandas")
+                    try:
+                        df_header = pd.read_csv(path, engine="c", nrows=0, on_bad_lines="skip")
+                    except Exception:
+                        df_header = pd.read_csv(path, engine="python", nrows=0, on_bad_lines="skip")
+            else:
+                print("DEBUG: Using Pandas for CSV header reading (Polars not available)")
+                try:
+                    # Try fast 'c' engine first (only reads header)
+                    df_header = pd.read_csv(path, engine="c", nrows=0, on_bad_lines="skip")
+                except Exception:
+                    # Fallback to 'python' engine if 'c' fails
+                    df_header = pd.read_csv(path, engine="python", nrows=0, on_bad_lines="skip")
             
             # Get channel columns (exclude metadata columns starting with "#" and unnamed columns)
             channel_cols = [col for col in df_header.columns 
                            if col and not str(col).startswith("#") 
                            and not str(col).strip() == ""
-                           and not str(col).startswith("Unnamed")]
+                           and not str(col).startswith("Unnamed")
+                           and not str(col).startswith("_duplicated_")]
             
             if not channel_cols:
                 QtWidgets.QMessageBox.warning(self, "CSV", "No channel columns found in CSV.")
