@@ -59,7 +59,7 @@ CMD_REQUEST_DATA     = 10
 FRAME_SIZE_SETTINGS  = 16384  # bytes
 
 # Logger defaults
-LOG_N_CHANNELS    = 12
+LOG_N_CHANNELS    = 16
 LOG_BATCH_SAMPLES = 1000
 LOG_PAYLOAD_U16   = LOG_N_CHANNELS * LOG_BATCH_SAMPLES
 LOG_PAYLOAD_SIZE  = 2 * LOG_PAYLOAD_U16
@@ -212,8 +212,8 @@ LOG_TABLE_VARIABLES = [
     ("Iq", "f32"),            
     ("foc_psi_ref", "f32"),      
     ("foc_trq_ref", "f32"),     
-    ("trq_actual", "f32"), 
     ("foc_psi_actual", "f32"), 
+    ("foc_trq_actual", "f32"), 
     ("dtc_psi_ref", "f32"),       
     ("dtc_trq_ref", "f32"),      
     ("dtc_psi_actual", "f32"),  
@@ -221,13 +221,22 @@ LOG_TABLE_VARIABLES = [
     ("dtc_sector", "u16"),        
     ("dtc_vector", "u16"),        
     ("Ia_ph", "f32"),         
-    ("Ib_ph", "f32"),         
+    ("Ib_ph", "f32"),
+    ("I1", "f32"), 
+    ("I2", "f32"), 
+    ("I3", "f32"), 
+    ("V1", "f32"), 
+    ("V2", "f32"),
+    ("V3", "f32"),         
     ("pwr_ref", "f32"),       
     ("pwr_actual", "f32"), 
     ("velocity_request", "i16"),   
     ("motor_rpm", "i16"),
     ("motor_rpm_actual", "i16"),       
     ("Vdc", "f32"),
+    ("TIM1_CCR1", "u16"),
+    ("TIM1_CCR2", "u16"),
+    ("TIM1_CCR3", "u16")
    
 ]
 
@@ -247,6 +256,7 @@ DIAG_FIELDS = [
     ("pwr_ref","f32"), ("pwr_actual","f32"),
 
     ("motor_rpm","i16"),
+    ("motor_rpm_actual","i16"),
     ("Vdc","f32"),
     ("Vdc_max","f32"),
     ("num_max_trq","i16"),
@@ -508,15 +518,14 @@ class DataLoggerQt:
             s16 = self._u16_to_s16(int(u16_val))
             return float(s16)
         elif var_type in ("f32", "f64"):
-            # Float: signed and scaled
+            # Float: signed and scaled (always scale f32/f64 types, regardless of channel position)
             if not self.SCALE_FLOATS:
-                return float(int(u16_val))
-            if i == 0 and not self.SCALE_CH1:
                 return float(int(u16_val))
             s16 = self._u16_to_s16(int(u16_val))
             return (s16 << self.SHIFT_BITS) / self._mult(i)
         else:
             # Fallback: default behavior (signed and scaled)
+            # Only apply SCALE_CH1 check for fallback case (when type is unknown)
             if not self.SCALE_FLOATS:
                 return float(int(u16_val))
             if i == 0 and not self.SCALE_CH1:
@@ -715,7 +724,7 @@ class DataLoggerQt:
                         side_idx += 1
                     else:
                         fc.write(",".join(fields) + "\n")
-            
+
             # Verify CSV was written successfully
             if not os.path.isfile(self.csv_path):
                 raise RuntimeError(f"CSV file was not created: {self.csv_path}")
@@ -903,7 +912,7 @@ class CSVLoaderThread(QtCore.QThread):
         
         # Use Polars if available, fallback to pandas
         if POLARS_AVAILABLE:
-            print("DEBUG: Using Polars for CSV loading")
+            #print("DEBUG: Using Polars for CSV loading")
             return self._load_full_csv_polars()
         else:
             print("DEBUG: Using Pandas for CSV loading (Polars not available)")
@@ -945,11 +954,13 @@ class CSVLoaderThread(QtCore.QThread):
         if self.downsample_factor > 1:
             # Use lazy evaluation with scan_csv for chunked processing
             try:
-                # Read CSV lazily and filter rows
+                # Read CSV lazily and filter rows with explicit schema for numeric types
+                schema_dict = {col: pl.Float32 for col in cols_to_read}
                 lazy_df = pl.scan_csv(
                     self.csv_path,
                     ignore_errors=True,
-                    truncate_ragged_lines=True
+                    truncate_ragged_lines=True,
+                    schema_overrides=schema_dict
                 ).select(cols_to_read)
                 
                 # Add row number column for downsampling
@@ -981,11 +992,14 @@ class CSVLoaderThread(QtCore.QThread):
         else:
             # No downsampling - read normally
             try:
+                # Read with explicit schema to ensure numeric types
+                schema_dict = {col: pl.Float32 for col in cols_to_read}
                 df_polars = pl.read_csv(
                     self.csv_path,
                     columns=cols_to_read,
                     ignore_errors=True,
-                    truncate_ragged_lines=True
+                    truncate_ragged_lines=True,
+                    schema_overrides=schema_dict
                 )
                 # Convert to pandas DataFrame for compatibility
                 df = df_polars.to_pandas()
@@ -994,7 +1008,7 @@ class CSVLoaderThread(QtCore.QThread):
                 print(f"DEBUG: Polars failed ({e}), falling back to Pandas")
                 return self._load_full_csv_pandas()
         
-        # Convert to numeric in-place to save memory
+        # Convert to numeric in-place to save memory (double-check all columns are numeric)
         for col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce", downcast='float')
         df = df.dropna(how="all")
@@ -1192,12 +1206,43 @@ class TwoWindowPlot(QtWidgets.QWidget):
             pw.setClipToView(True)
             pw.plotItem.setMouseEnabled(x=True, y=True)
 
+        # Add horizontal zero reference lines so users can compare signals to 0
+        try:
+            zero_pen = pg.mkPen(color=(180, 180, 180), width=1)
+            zero_pen.setStyle(QtCore.Qt.DashLine)
+        except Exception:
+            zero_pen = pg.mkPen((180, 180, 180))
+        self._zero_line1 = pg.InfiniteLine(pos=0.0, angle=0, pen=zero_pen, movable=False)
+        self._zero_line2 = pg.InfiniteLine(pos=0.0, angle=0, pen=zero_pen, movable=False)
+        # Ensure the zero lines are above plotted curves
+        try:
+            self._zero_line1.setZValue(1_000_000)
+            self._zero_line2.setZValue(1_000_000)
+        except Exception:
+            pass
+        self.plot1.addItem(self._zero_line1)
+        self.plot2.addItem(self._zero_line2)
+
         # state
         self._curves = {}            # keys: (win_id, name) -> PlotDataItem
+        # Vibrant color palette (no grey/dull tones)
         self._palette = [
-            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
-            "#ff33a6", "#33ff77"
+            "#e41a1c",  # red
+            "#377eb8",  # blue
+            "#4daf4a",  # green
+            "#984ea3",  # purple
+            "#ff7f00",  # orange
+            "#ffff33",  # yellow
+            "#f781bf",  # pink
+            "#00ffff",  # cyan
+            "#1e90ff",  # dodger blue
+            "#ff1493",  # deep pink
+            "#00ff7f",  # spring green
+            "#ffd700",  # gold
+            "#ff4500",  # orange red
+            "#7fff00",  # chartreuse
+            "#00ced1",  # dark turquoise
+            "#ff00ff"   # magenta
         ]
         self._ch_pen = {}            # name -> QPen
 
@@ -1284,18 +1329,31 @@ class TwoWindowPlot(QtWidgets.QWidget):
     def set_zoom_mode(self, mode: str):
         vb1 = self.plot1.getViewBox()
         vb2 = self.plot2.getViewBox()
+        # Capture current ranges so switching modes preserves manual zoom
+        vrs = []
+        for vb in (vb1, vb2):
+            xr, yr = vb.viewRange()
+            vrs.append((tuple(xr), tuple(yr)))
         if mode == "x":
-            for vb in (vb1, vb2):
+            for idx, vb in enumerate((vb1, vb2)):
                 vb.setMouseMode(pg.ViewBox.RectMode)
-                vb.disableAutoRange(axis=pg.ViewBox.YAxis)
-                vb.enableAutoRange(axis=pg.ViewBox.XAxis)
+                # Freeze both axes to prevent autorange from resetting zoom
+                vb.disableAutoRange()  # both axes
+                xr, yr = vrs[idx]
+                # Restore current ranges
+                vb.setXRange(xr[0], xr[1], padding=0)
+                vb.setYRange(yr[0], yr[1], padding=0)
                 # Restrict mouse wheel zoom to x-axis only
                 vb.setMouseEnabled(x=True, y=False)
         elif mode == "y":
-            for vb in (vb1, vb2):
+            for idx, vb in enumerate((vb1, vb2)):
                 vb.setMouseMode(pg.ViewBox.RectMode)
-                vb.disableAutoRange(axis=pg.ViewBox.XAxis)
-                vb.enableAutoRange(axis=pg.ViewBox.YAxis)
+                # Freeze both axes to prevent autorange from resetting zoom
+                vb.disableAutoRange()  # both axes
+                xr, yr = vrs[idx]
+                # Restore current ranges
+                vb.setXRange(xr[0], xr[1], padding=0)
+                vb.setYRange(yr[0], yr[1], padding=0)
                 # Restrict mouse wheel zoom to y-axis only
                 vb.setMouseEnabled(x=False, y=True)
         else:
@@ -1326,11 +1384,26 @@ class TwoWindowPlot(QtWidgets.QWidget):
             if xmins:
                 xmin, xmax = min(xmins), max(xmaxs)
                 ymin, ymax = min(ymins), max(ymaxs)
+                # Always include 0 on Y axis in view
+                if ymin > 0.0:
+                    ymin = 0.0
+                if ymax < 0.0:
+                    ymax = 0.0
                 if xmax == xmin:
                     xmax += 1.0
+                # If all Y values are identical, expand toward 0 (not symmetric)
                 if ymax == ymin:
-                    ymax += 1.0
+                    k = ymax
+                    if k >= 0.0:
+                        ymin = 0.0
+                        ymax = 1.0 if k == 0.0 else k
+                    else:
+                        ymin = k
+                        ymax = 0.0
                 vb.setRange(xRange=(xmin, xmax), yRange=(ymin, ymax), padding=0.05)
+            else:
+                # No data: default to a symmetric range around 0 to keep 0 visible
+                vb.setRange(yRange=(-1.0, 1.0), padding=0.05)
             # Re-enable both axes for normal zoom
             vb.setMouseEnabled(x=True, y=True)
             # 3) re-enable autorange for next user zooms
@@ -1415,7 +1488,7 @@ class TwoWindowPlot(QtWidgets.QWidget):
                         # Read header to verify channels exist
                         if POLARS_AVAILABLE:
                             try:
-                                print("DEBUG: Using Polars for CSV header reading (cache merge)")
+                                #print("DEBUG: Using Polars for CSV header reading (cache merge)")
                                 df_header_polars = pl.read_csv(csv_path, n_rows=0, ignore_errors=True, truncate_ragged_lines=True)
                                 df_header = df_header_polars.to_pandas()  # Convert to pandas for compatibility
                             except Exception as e:
@@ -1523,7 +1596,7 @@ class TwoWindowPlot(QtWidgets.QWidget):
             
             # Start background thread to load CSV (full file with downsampling)
             # Debug: verify downsample_factor is correct
-            print(f"DEBUG: plot_csv called with downsample_factor = {downsample_factor}")
+            #print(f"DEBUG: plot_csv called with downsample_factor = {downsample_factor}")
             self._csv_loader_thread = CSVLoaderThread(
                 csv_path,
                 needed_channels,
@@ -1533,7 +1606,7 @@ class TwoWindowPlot(QtWidgets.QWidget):
                 None,  # No selective range - always load full file
                 self
             )
-            print(f"DEBUG: CSVLoaderThread created with downsample_factor = {self._csv_loader_thread.downsample_factor}")
+            #print(f"DEBUG: CSVLoaderThread created with downsample_factor = {self._csv_loader_thread.downsample_factor}")
             self._csv_loader_thread.sig_data_loaded.connect(self._on_csv_data_loaded)
             self._csv_loader_thread.sig_error.connect(self._on_csv_load_error)
             self._csv_loader_thread.start()
@@ -1629,10 +1702,10 @@ class TwoWindowPlot(QtWidgets.QWidget):
         try:
             # Process events before starting to keep GUI responsive
             QtWidgets.QApplication.processEvents()
-            
+
             # (A) Configure groups/curves first
             self.set_groups(groups1, groups2, titles1, titles2, link_x)
-            
+
             # Process events after set_groups to keep GUI responsive
             QtWidgets.QApplication.processEvents()
 
@@ -1640,6 +1713,39 @@ class TwoWindowPlot(QtWidgets.QWidget):
             n = len(df.index)
             x_full = np.arange(n, dtype=np.float64) * downsample_factor  # Scale x-axis by downsample factor
             
+            # Set dynamic x-limits to current data span to avoid overflow in ViewBox
+            try:
+                x_min = 0.0
+                x_max = float((n - 1) * downsample_factor) if n > 0 else 1.0
+                max_range = max(1.0, x_max - x_min)
+                # Compute y-limits from the columns we are about to plot
+                used_names = {name for (_wid, name) in self._curves.keys()} & set(df.columns)
+                if used_names:
+                    # Stack selected columns to compute finite min/max efficiently
+                    y_data = df[list(used_names)].to_numpy(dtype=np.float32, copy=False)
+                    # Convert non-finite to NaN, then compute nanmin/nanmax safely
+                    y_min = float(np.nanmin(y_data)) if np.isfinite(y_data).any() else 0.0
+                    y_max = float(np.nanmax(y_data)) if np.isfinite(y_data).any() else 1.0
+                    if not np.isfinite(y_min):
+                        y_min = 0.0
+                    if not np.isfinite(y_max):
+                        y_max = 1.0
+                    if y_max == y_min:
+                        y_max = y_min + 1.0
+                    y_range = max(1e-6, y_max - y_min)
+                    min_y_range = max(1e-6, y_range * 1e-6)
+                    max_y_range = max(y_range, 1.0) * 1000.0
+                else:
+                    y_min, y_max = 0.0, 1.0
+                    min_y_range, max_y_range = 1e-6, 1.0
+                for vb in (self.plot1.getViewBox(), self.plot2.getViewBox()):
+                    vb.setLimits(
+                        xMin=x_min, xMax=x_max, minXRange=1.0, maxXRange=max_range,
+                        yMin=y_min, yMax=y_max, minYRange=min_y_range, maxYRange=max_y_range
+                    )
+            except Exception:
+                pass
+
             # IMPORTANT: When data is already downsampled (downsample_factor > 1), 
             # we should NOT apply additional adaptive decimation, as it would further reduce resolution.
             # The data is already at the desired resolution from CSV loading.
@@ -1661,6 +1767,10 @@ class TwoWindowPlot(QtWidgets.QWidget):
                 if name in df.columns:
                     # Use .values directly and convert to float32 to avoid unnecessary copies
                     y_col = df[name].values.astype(np.float32, copy=False)
+                    # Guard against non-finite values triggering autorange overflow
+                    if not np.isfinite(y_col).any():
+                        curve.setData(x=[], y=[])
+                        continue
                     # x is already decimated, y needs to match
                     curve.setData(x=x, y=y_col[::ds], connect='finite', skipFiniteCheck=True)
                     curve_idx += 1
@@ -1680,7 +1790,7 @@ class TwoWindowPlot(QtWidgets.QWidget):
                 self._progress_bar.setVisible(False)
 
 
-    
+
     # ---------- helpers ----------
     def _pen_for(self, name: str):
         if name not in self._ch_pen:
@@ -1728,6 +1838,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.csv_request_path = None  # Path to loaded CSV file
         self.csv_sequence_finished = False  # Flag to track if sequence has finished
         self.csv_sequence_started = False  # Flag to track if sequence was explicitly started
+        self.csv_logging_started_auto = False  # Flag to track if logging was started automatically
 
         # ============ Live plot buffers ============
         self.live_max_samples = 500  # default window size (adjustable)
@@ -1828,7 +1939,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.options_btn.setToolButtonStyle(QtCore.Qt.ToolButtonIconOnly)
         self.options_btn.setIconSize(QtCore.QSize(16, 16))
 
-        # Try to load a proper “settings/gear” icon; fall back to ⚙ if not available
+        # Try to load a proper "settings/gear" icon; fall back to ⚙ if not available
         ico = QtGui.QIcon.fromTheme("preferences-system")
         if ico.isNull():
             ico = QtGui.QIcon.fromTheme("settings")
@@ -3029,6 +3140,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.csv_request_start_time = None
             self.csv_sequence_finished = False
             
+            # Stop logging if it was started automatically
+            if self.csv_logging_started_auto and self.logging:
+                self._toggle_logging()
+                self.csv_logging_started_auto = False
+            
             # Set request value to 0
             mode = int(self.ctrl_mode.currentData())
             if mode == 1:  # SPEED CONTROL
@@ -3060,6 +3176,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.csv_request_start_time = None
         self.csv_sequence_finished = False
         self.csv_sequence_started = True
+        
+        # Start logging if checkbox is checked and logging is not already active
+        if hasattr(self, 'csv_log_with_sequence_chk') and self.csv_log_with_sequence_chk.isChecked():
+            if not self.logging:
+                self._toggle_logging()
+                self.csv_logging_started_auto = True
+            else:
+                # Logging already active, don't mark as auto-started
+                self.csv_logging_started_auto = False
+        else:
+            self.csv_logging_started_auto = False
         
         # Update label
         filename = os.path.basename(self.csv_request_path) if self.csv_request_path else "CSV"
@@ -3119,6 +3246,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 if hasattr(self, 'csv_request_value_label'):
                     self.csv_request_value_label.setText("Finished")
                     self.csv_request_value_label.setStyleSheet("color: #ff6600; font-weight: bold; min-width: 80px;")
+                
+                # Stop logging if it was started automatically
+                if self.csv_logging_started_auto and self.logging:
+                    self._toggle_logging()
+                    self.csv_logging_started_auto = False
+                
                 self._set_status("CSV sequence finished ✅")
             return requests[-1]  # Return last value
         
@@ -3135,7 +3268,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return requests[i]
         
         return requests[-1]  # Fallback
-    
+
     # ---------------- Periodic control ----------------
     def _on_periodic_toggled(self, checked: bool):
         if checked:
@@ -3432,8 +3565,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.csv_request_value_label.setStyleSheet("color: #666; font-weight: normal; min-width: 80px;")
             
             # Use widget values
-            self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
-            self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
+        self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
+        self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
         
         self._ctrl_vals["mode"]         = int(self.ctrl_mode.currentData())
         self._ctrl_vals["inv_en"]       = 1 if self.ctrl_inverter_en.isChecked() else 0
@@ -3482,8 +3615,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.csv_request_value_label.setStyleSheet("color: #666; font-weight: normal; min-width: 80px;")
             
             # Use widget values
-            self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
-            self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
+        self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
+        self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
         
         # Mode/enable are already staged on change, but we refresh anyway:
         self._ctrl_vals["mode"]   = int(self.ctrl_mode.currentData())
@@ -3610,6 +3743,9 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_start_csv.setEnabled(False)  # Disabled until CSV is loaded
         self.csv_start_btn = btn_start_csv  # Store reference
         csv_layout.addWidget(btn_start_csv)
+        # Checkbox to start logging with sequence
+        self.csv_log_with_sequence_chk = QtWidgets.QCheckBox("Start log with sequence")
+        csv_layout.addWidget(self.csv_log_with_sequence_chk)
         # Display for current request value
         csv_layout.addWidget(QtWidgets.QLabel("Request:"))
         self.csv_request_value_label = QtWidgets.QLabel("N/A")
@@ -3746,7 +3882,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.live_plot2.setAntialiasing(True)
         self.live_plot2.addLegend()
         self.vb2 = self.live_plot2.getViewBox()
-        self.vb2.enableAutoRange(x=True, y=True)
+        # Disable x-axis auto-range for plot2 since it's linked to plot1
+        # Only y-axis auto-ranges independently
+        self.vb2.enableAutoRange(x=False, y=True)
         
         # Link x-axis of plot2 to plot1 (so zooming/panning x-axis affects both)
         self.live_plot2.setXLink(self.live_plot1)
@@ -3819,7 +3957,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # when resuming, immediately re-enable auto-follow
         if self.plots_running:
             self.vb1.enableAutoRange(x=True, y=True)
-            self.vb2.enableAutoRange(x=True, y=True)
+            # Only enable y-axis auto-range for plot2 (x-axis is linked to plot1)
+            self.vb2.enableAutoRange(x=False, y=True)
 
     def _send_control_once(self):
         if not self._ensure_open():
@@ -3872,7 +4011,8 @@ class MainWindow(QtWidgets.QMainWindow):
             vb2.setMouseEnabled(x=False, y=True)
         else:
             vb1.enableAutoRange(axis=pg.ViewBox.XYAxes)
-            vb2.enableAutoRange(axis=pg.ViewBox.XYAxes)
+            # Only enable y-axis auto-range for plot2 (x-axis is linked to plot1)
+            vb2.enableAutoRange(axis=pg.ViewBox.YAxis)
             # Re-enable both axes for normal zoom
             vb1.setMouseEnabled(x=True, y=True)
             vb2.setMouseEnabled(x=True, y=True)
@@ -3880,11 +4020,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def _zoom_fit(self):
         self.zoomx_btn.setChecked(False)
         self.zoomy_btn.setChecked(False)
-        for vb in (self.live_plot1.getViewBox(), self.live_plot2.getViewBox()):
-            vb.enableAutoRange(axis=pg.ViewBox.XYAxes)
-            vb.autoRange()
-            # Re-enable both axes for normal zoom
-            vb.setMouseEnabled(x=True, y=True)
+        vb1 = self.live_plot1.getViewBox()
+        vb2 = self.live_plot2.getViewBox()
+        # Auto-range both axes for plot1
+        vb1.enableAutoRange(axis=pg.ViewBox.XYAxes)
+        vb1.autoRange()
+        # Only auto-range y-axis for plot2 (x-axis is linked to plot1)
+        vb2.enableAutoRange(axis=pg.ViewBox.YAxis)
+        vb2.autoRange()
+        # Re-enable both axes for normal zoom
+        vb1.setMouseEnabled(x=True, y=True)
+        vb2.setMouseEnabled(x=True, y=True)
 
     # ---------------- Graph tab ----------------
     def _build_graph_tab(self):
@@ -3893,8 +4039,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Top control bar
         ctrl = QtWidgets.QHBoxLayout()
-        btn_load_csv = QtWidgets.QPushButton("Load CSV…"); btn_load_csv.clicked.connect(self._pick_csv_into_graph)
+        btn_load_csv = QtWidgets.QPushButton("Load CSV…")
+        btn_load_csv.clicked.connect(self._pick_csv_into_graph)
         ctrl.addWidget(btn_load_csv)
+        
+        # CSV info display (filename and settings)
+        self.csv_info_label = QtWidgets.QLabel("No CSV loaded")
+        self.csv_info_label.setStyleSheet("color: #666; font-style: italic;")
+        ctrl.addWidget(self.csv_info_label)
+        
         self.linkx_chk = QtWidgets.QCheckBox("Link X"); self.linkx_chk.setChecked(True)
         ctrl.addWidget(self.linkx_chk)
         ctrl.addStretch(1)
@@ -4013,7 +4166,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             
             # Build CSV
-            self.dlogger.build_csv()
+                self.dlogger.build_csv()
             
             # Verify CSV was created
             if os.path.isfile(self.dlogger.csv_path):
@@ -4031,9 +4184,89 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
     def _pick_csv_into_graph(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Pick CSV", DATA_DIR, "CSV (*.csv)")
-        if not path: return
-        self._load_csv_and_update_channels(path)
+        """Open file dialog with preview on single-click, load on double-click."""
+        dialog = QtWidgets.QFileDialog(self, "Pick CSV", DATA_DIR, "CSV (*.csv)")
+        dialog.setFileMode(QtWidgets.QFileDialog.ExistingFile)
+        
+        # Track selected file for preview
+        selected_file = [None]
+        original_label_text = self.csv_info_label.text() if hasattr(self, 'csv_info_label') else "No CSV loaded"
+        
+        def on_file_selected(file_path):
+            """Show settings preview when file is selected (single-click)."""
+            if file_path and os.path.isfile(file_path):
+                selected_file[0] = file_path
+                # Parse settings
+                settings_dict, monitor_extras = self._parse_csv_settings(file_path)
+                # Update the CSV info label next to the load button
+                self._update_csv_info_display(file_path, settings_dict, monitor_extras)
+            else:
+                # Reset to original if no file selected
+                if hasattr(self, 'csv_info_label'):
+                    self.csv_info_label.setText(original_label_text)
+                    self.csv_info_label.setStyleSheet("color: #666; font-style: italic;")
+        
+        def on_dialog_finished(result):
+            """Reset preview if dialog was cancelled."""
+            if result != QtWidgets.QDialog.Accepted:
+                if hasattr(self, 'csv_info_label'):
+                    # Only reset if no CSV is currently loaded
+                    if not hasattr(self, 'current_csv_path') or self.current_csv_path is None:
+                        self.csv_info_label.setText(original_label_text)
+                        self.csv_info_label.setStyleSheet("color: #666; font-style: italic;")
+        
+        # Connect file selection signal
+        dialog.currentChanged.connect(on_file_selected)
+        dialog.finished.connect(on_dialog_finished)
+        
+        # Show dialog
+        if dialog.exec() == QtWidgets.QDialog.Accepted:
+            selected = dialog.selectedFiles()
+            if selected:
+                path = selected[0]
+                self._load_csv_and_update_channels(path)
+    
+    def _format_settings_preview(self, csv_path: str, settings_dict: dict) -> str:
+        """Format settings for preview display."""
+        filename = os.path.basename(csv_path)
+        
+        # Extract important settings
+        settings_to_show = [
+            ("motor_type", "motor_type"),
+            ("motor_connection", "motor_conn"),
+            ("mode", "mode"),
+            ("sensored_control", "sensored"),
+            ("Fs_trq", "Fs_trq"),
+            ("cc_trise", "cc_trise"),
+            ("spdc_trise", "spdc_trise")
+        ]
+        
+        settings_lines = [f"<b>{filename}</b>", ""]
+        for setting_name, display_name in settings_to_show:
+            value = settings_dict.get(setting_name, "N/A")
+            # Format enum values nicely
+            if setting_name == "sensored_control":
+                value = "ON" if value == "ENABLED" else "OFF" if value == "DISABLED" else value
+            elif setting_name in ("motor_type", "motor_connection", "mode"):
+                # These are enum values, show as-is
+                pass
+            elif value != "N/A":
+                # Try to format decimal numbers to 4 digits
+                try:
+                    float_val = float(value)
+                    # Check if it's a decimal number (has fractional part)
+                    if float_val != int(float_val):
+                        # Format to 4 significant digits
+                        value = f"{float_val:.4g}"
+                    else:
+                        # Integer value, show as-is
+                        value = str(int(float_val))
+                except (ValueError, TypeError):
+                    # Not a number, keep as-is
+                    pass
+            settings_lines.append(f"<b>{display_name}:</b> {value}")
+        
+        return "<br>".join(settings_lines)
 
     def _load_csv_and_update_channels(self, path: str):
         """Load CSV, extract available channels, and update UI with MultiSelectCombo."""
@@ -4072,6 +4305,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.warning(self, "CSV", "No channel columns found in CSV.")
                 return
             
+            # Parse settings from CSV
+            settings_dict, monitor_extras = self._parse_csv_settings(path)
+            
+            # Update CSV info display
+            self._update_csv_info_display(path, settings_dict, monitor_extras)
+            
             self.available_channels = channel_cols
             self.current_csv_path = path
             # Clear cache when loading new file
@@ -4090,6 +4329,188 @@ class MainWindow(QtWidgets.QMainWindow):
             
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "CSV", f"Failed to load CSV:\n{e}")
+    
+    def _parse_csv_settings(self, csv_path: str):
+        """Parse settings and monitor metadata from the CSV file.
+        Returns (settings_dict, monitor_extras_dict).
+        """
+        settings_dict: dict[str, str] = {}
+        monitor_extras: dict[str, str] = {}
+
+        try:
+            import pandas as pd
+
+            # Read CSV to find the settings column (column P contains "#SETTINGS" in first row)
+            df_header = pd.read_csv(csv_path, nrows=1, engine="python", on_bad_lines="skip", header=None)
+
+            settings_name_col_idx = None
+            for col_idx in range(len(df_header.columns)):
+                first_val = str(df_header.iloc[0, col_idx]) if len(df_header) > 0 else ""
+                if "#SETTINGS" in first_val:
+                    settings_name_col_idx = col_idx
+                    break
+
+            if settings_name_col_idx is not None:
+                settings_value_col_idx = settings_name_col_idx + 1
+                #print(f"DEBUG: Found #SETTINGS at column index {settings_name_col_idx}, values at {settings_value_col_idx}")
+
+                df_full = pd.read_csv(
+                    csv_path,
+                    engine="python",
+                    on_bad_lines="skip",
+                    header=None
+                )
+                #print(f"DEBUG: CSV has {len(df_full)} rows, {len(df_full.columns)} columns")
+
+                if len(df_full) > 1 and settings_value_col_idx < len(df_full.columns):
+                    for idx in range(1, len(df_full)):
+                        if settings_name_col_idx >= len(df_full.columns):
+                            break
+                        name = str(df_full.iloc[idx, settings_name_col_idx]).strip()
+                        value = str(df_full.iloc[idx, settings_value_col_idx]).strip()
+
+                        if "#SETTINGS" in name:
+                            continue
+                        if name == "" or name.lower() == "nan":
+                            #print(f"DEBUG: Stopping at row {idx} - empty name")
+                            break
+                        if name.startswith("#"):
+                            #print(f"DEBUG: Stopping at row {idx} - hit section marker: {name}")
+                            break
+                        if value == "" or value.lower() == "nan":
+                            continue
+
+                        settings_dict[name] = value
+                        #print(f"DEBUG: Parsed setting: {name} = {value}")
+                else:
+                    print("DEBUG: Settings columns out of range while parsing")
+            else:
+                print(f"DEBUG: Could not find #SETTINGS column. Columns: {len(df_header.columns)}")
+        except Exception as e:
+            print(f"Warning: Failed to parse settings from CSV: {e}")
+            import traceback
+            traceback.print_exc()
+
+        # Extract monitor metadata using csv.reader (handles ragged rows)
+        try:
+            import csv
+            with open(csv_path, newline="", encoding="utf-8", errors="ignore") as fh:
+                reader = csv.reader(fh)
+                for row in reader:
+                    if not row:
+                        continue
+                    if any(cell.strip().upper() == "#MONITOR" for cell in row if cell):
+                        #print(f"DEBUG: Raw #MONITOR row -> {row}")
+
+                        header_row = next(reader, [])
+                        while header_row and not any(cell.strip() for cell in header_row):
+                            header_row = next(reader, [])
+
+                        value_row = next(reader, [])
+                        while value_row and not any(cell.strip() for cell in value_row):
+                            value_row = next(reader, [])
+
+                        # print(f"DEBUG: Monitor header row -> {header_row[:10]}")
+                        # print(f"DEBUG: Monitor value row  -> {value_row[:10]}")
+
+                        start_idx = 0
+                        for idx, cell in enumerate(header_row):
+                            if cell.strip():
+                                start_idx = idx
+                                break
+
+                        for name, value in zip(header_row[start_idx:], value_row[start_idx:]):
+                            name = name.strip()
+                            if not name or name.startswith("#"):
+                                continue
+                            value = value.strip()
+                            if not value:
+                                continue
+                            monitor_extras[name] = value
+                        break
+        except StopIteration:
+            pass
+        except Exception as monitor_err:
+            print(f"DEBUG: Failed to parse #MONITOR block ({monitor_err})")
+
+        mode_val = monitor_extras.get("mode") or monitor_extras.get("Mode")
+        vdc_val = monitor_extras.get("Vdc") or monitor_extras.get("VDC")
+        #print(f"DEBUG: monitor mode extracted -> {mode_val}")
+        #print(f"DEBUG: monitor Vdc extracted -> {vdc_val}")
+
+        return settings_dict, monitor_extras
+    
+    def _update_csv_info_display(self, csv_path: str, settings_dict: dict, monitor_extras: dict | None = None):
+        """Update the CSV info label with filename and important settings."""
+        filename = os.path.basename(csv_path)
+        
+        # Extract important settings
+        settings_to_show = [
+            ("motor_type", "motor_type"),
+            ("motor_connection", "motor_conn"),
+            ("mode", "mode"),
+            ("sensored_control", "sensored"),
+            ("Fs_trq", "Fs_trq"),
+            ("cc_trise", "cc_trise"),
+            ("spdc_trise", "spdc_trise")
+        ]
+        
+        settings_parts = []
+        for setting_name, display_name in settings_to_show:
+            value = settings_dict.get(setting_name, "N/A")
+            # Format enum values nicely
+            if setting_name == "sensored_control":
+                value = "ON" if value == "ENABLED" else "OFF" if value == "DISABLED" else value
+            elif setting_name in ("motor_type", "motor_connection", "mode"):
+                # These are enum values, show as-is
+                pass
+            elif value != "N/A":
+                # Try to format decimal numbers to 4 digits
+                try:
+                    float_val = float(value)
+                    # Check if it's a decimal number (has fractional part)
+                    if float_val != int(float_val):
+                        # Format to 4 significant digits
+                        value = f"{float_val:.4g}"
+                    else:
+                        # Integer value, show as-is
+                        value = str(int(float_val))
+                except (ValueError, TypeError):
+                    # Not a number, keep as-is
+                    pass
+            settings_parts.append(f"{display_name}: {value}")
+        
+        info_parts = [filename]
+        if settings_parts:
+            info_parts.append(" | ".join(settings_parts))
+
+        # Append monitor-derived extras (mode, Vdc) if available
+        if monitor_extras:
+            mode_value = monitor_extras.get("mode") or monitor_extras.get("Mode")
+            vdc_value = monitor_extras.get("Vdc") or monitor_extras.get("VDC")
+
+            if mode_value is not None:
+                mode_str = str(mode_value)
+                info_parts.append(mode_str)
+
+            if vdc_value is not None:
+                vdc_str = str(vdc_value)
+                try:
+                    vdc_float = float(vdc_str)
+                    if vdc_float != int(vdc_float):
+                        vdc_str = f"{vdc_float:.4g}"
+                    else:
+                        vdc_str = str(int(vdc_float))
+                except Exception:
+                    pass
+                info_parts.append(f"Vdc: {vdc_str}")
+
+        info_text = " | ".join(info_parts)
+        #print(f"DEBUG: CSV info display -> {info_text}")
+ 
+        if hasattr(self, 'csv_info_label'):
+            self.csv_info_label.setText(info_text)
+            self.csv_info_label.setStyleSheet("")  # Use default/natural text color
 
     def _on_csv_channels_changed(self):
         """Called when channel selection changes in CSV plot combos."""
@@ -4126,7 +4547,7 @@ class MainWindow(QtWidgets.QMainWindow):
             downsample_factor = 1
         
         # Debug: verify downsample_factor from dropdown
-        print(f"DEBUG: _plot_csv_path: dropdown currentData = {self.csv_downsample_combo.currentData()}, using downsample_factor = {downsample_factor}")
+        #print(f"DEBUG: _plot_csv_path: dropdown currentData = {self.csv_downsample_combo.currentData()}, using downsample_factor = {downsample_factor}")
 
         linkx = self.linkx_chk.isChecked()
         try:
@@ -4134,7 +4555,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_status(f"Opened: {os.path.basename(path)} ✅")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "CSV", f"Failed to plot:\n{e}")
-    
+
     def _on_downsample_changed(self):
         """Called when downsampling factor changes - reload CSV with new factor."""
         if self.current_csv_path:
@@ -4164,7 +4585,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._postlog_lines = []
             self._postlog_rows = []              # << reset so we never reuse previous batch
             self._staged_pc_row = None
-            self._awaiting_postlog = False
             self._stop_timeout.stop()
             # start DataLoggerQt (file handling only)
             self.dlogger = DataLoggerQt(self, n_channels=LOG_N_CHANNELS, data_dir=DATA_DIR)
@@ -4500,7 +4920,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # Auto-range (only if we have curves)
             if self.live_curves1 or self.live_curves2:
                 self.vb1.enableAutoRange(x=True, y=True)
-                self.vb2.enableAutoRange(x=True, y=True)
+                # Only enable y-axis auto-range for plot2 (x-axis is linked to plot1)
+                self.vb2.enableAutoRange(x=False, y=True)
 
     # ---------------- Helpers ----------------
     def _ensure_open(self) -> bool:
