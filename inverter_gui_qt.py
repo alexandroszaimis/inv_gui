@@ -600,6 +600,34 @@ class DataLoggerQt:
             lines.append(f"{name},{out}")
         lines.append("")  # blank separator
 
+        # Append LOG parameters (e.g., data_logger_ts_div) if available
+        try:
+            ts_div_val = None
+            # Prefer send field from Log Settings
+            if hasattr(self.app, "log_send_vars"):
+                w = self.app.log_send_vars.get("data_logger_ts_div")
+                if isinstance(w, QtWidgets.QLineEdit):
+                    txt = w.text().strip()
+                    if txt != "":
+                        try:
+                            ts_div_val = int(float(txt))
+                        except Exception:
+                            pass
+            # Fallback to received values
+            if ts_div_val is None and hasattr(self.app, "_recv_values"):
+                rv = self.app._recv_values.get("data_logger_ts_div")
+                if rv is not None:
+                    try:
+                        ts_div_val = int(float(rv))
+                    except Exception:
+                        pass
+            if ts_div_val is not None:
+                lines.append("#LOG,")
+                lines.append(f"data_logger_ts_div,{ts_div_val}")
+                lines.append("")
+        except Exception:
+            pass
+
         # MONITOR header
         ctrl_header = ["num_max_trq","num_min_trq","max_velocity","min_velocity",
                        "velocity_req","torque_req","mode","inv_en"]
@@ -1172,8 +1200,11 @@ class CSVLoaderThread(QtCore.QThread):
 
 # ----------------------- Plot widgets (pyqtgraph) -----------------------
 class TwoWindowPlot(QtWidgets.QWidget):
+    # Emit x1, y1, x2, y2, dx, dy whenever either cursor moves
+    cursorMoved = QtCore.Signal(float, float, float, float, float, float)
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._sec_per_sample = 1.0  # Default: x-axis in samples
         self._cached_csv_data = None  # Cache CSV data to avoid re-reading
         self._cached_csv_path = None
         self._cached_downsample_factor = 1  # Track downsample factor used for cached data
@@ -1246,6 +1277,110 @@ class TwoWindowPlot(QtWidgets.QWidget):
         ]
         self._ch_pen = {}            # name -> QPen
 
+        # --- cursors on plot1 (two crosshairs) ---
+        self._cursors_enabled = False
+        cursor_pen_1 = pg.mkPen((255, 200, 0), width=1)
+        cursor_pen_2 = pg.mkPen((0, 200, 255), width=1)
+        self._cursor1_v = pg.InfiniteLine(angle=90, movable=True, pen=cursor_pen_1)
+        self._cursor1_h = pg.InfiniteLine(angle=0,  movable=True, pen=cursor_pen_1)
+        self._cursor2_v = pg.InfiniteLine(angle=90, movable=True, pen=cursor_pen_2)
+        self._cursor2_h = pg.InfiniteLine(angle=0,  movable=True, pen=cursor_pen_2)
+        # keep cursors above data
+        try:
+            for ln in (self._cursor1_v, self._cursor1_h, self._cursor2_v, self._cursor2_h):
+                ln.setZValue(1_000_001)
+        except Exception:
+            pass
+        # Add to plot1 only; X may be linked to plot2 visually
+        self.plot1.addItem(self._cursor1_v)
+        self.plot1.addItem(self._cursor1_h)
+        self.plot1.addItem(self._cursor2_v)
+        self.plot1.addItem(self._cursor2_h)
+        # Start hidden until enabled via UI
+        for ln in (self._cursor1_v, self._cursor1_h, self._cursor2_v, self._cursor2_h):
+            ln.hide()
+        # Initialize positions roughly at 1/3 and 2/3 of current view
+        try:
+            xr, yr = self.plot1.getViewBox().viewRange()
+            xmid1 = xr[0] + (xr[1] - xr[0]) * 0.33
+            xmid2 = xr[0] + (xr[1] - xr[0]) * 0.66
+            ymid1 = yr[0] + (yr[1] - yr[0]) * 0.5
+            ymid2 = ymid1
+        except Exception:
+            xmid1 = 0.0; xmid2 = 1.0; ymid1 = 0.0; ymid2 = 0.0
+        self._cursor1_v.setPos(xmid1); self._cursor1_h.setPos(ymid1)
+        self._cursor2_v.setPos(xmid2); self._cursor2_h.setPos(ymid2)
+        # Wire move events
+        try:
+            self._cursor1_v.sigPositionChanged.connect(self._emit_cursor_update)
+            self._cursor1_h.sigPositionChanged.connect(self._emit_cursor_update)
+            self._cursor2_v.sigPositionChanged.connect(self._emit_cursor_update)
+            self._cursor2_h.sigPositionChanged.connect(self._emit_cursor_update)
+        except Exception:
+            pass
+
+        # --- cursors on plot2 (two crosshairs) ---
+        self._cursors2_enabled = False
+        self._p2_cursor1_v = pg.InfiniteLine(angle=90, movable=True, pen=cursor_pen_1)
+        self._p2_cursor1_h = pg.InfiniteLine(angle=0,  movable=True, pen=cursor_pen_1)
+        self._p2_cursor2_v = pg.InfiniteLine(angle=90, movable=True, pen=cursor_pen_2)
+        self._p2_cursor2_h = pg.InfiniteLine(angle=0,  movable=True, pen=cursor_pen_2)
+        try:
+            for ln in (self._p2_cursor1_v, self._p2_cursor1_h, self._p2_cursor2_v, self._p2_cursor2_h):
+                ln.setZValue(1_000_001)
+        except Exception:
+            pass
+        self.plot2.addItem(self._p2_cursor1_v)
+        self.plot2.addItem(self._p2_cursor1_h)
+        self.plot2.addItem(self._p2_cursor2_v)
+        self.plot2.addItem(self._p2_cursor2_h)
+        for ln in (self._p2_cursor1_v, self._p2_cursor1_h, self._p2_cursor2_v, self._p2_cursor2_h):
+            ln.hide()
+        # Initialize
+        try:
+            xr2, yr2 = self.plot2.getViewBox().viewRange()
+            x2_1 = xr2[0] + (xr2[1] - xr2[0]) * 0.33
+            x2_2 = xr2[0] + (xr2[1] - xr2[0]) * 0.66
+            y2_1 = yr2[0] + (yr2[1] - yr2[0]) * 0.5
+            y2_2 = y2_1
+        except Exception:
+            x2_1 = 0.0; x2_2 = 1.0; y2_1 = 0.0; y2_2 = 0.0
+        self._p2_cursor1_v.setPos(x2_1); self._p2_cursor1_h.setPos(y2_1)
+        self._p2_cursor2_v.setPos(x2_2); self._p2_cursor2_h.setPos(y2_2)
+
+        # Link X positions between plots (avoid recursion)
+        self._updating_cursors = False
+        def _on_p1_vcursor_moved():
+            if self._updating_cursors:
+                return
+            try:
+                self._updating_cursors = True
+                self._p2_cursor1_v.setPos(self._cursor1_v.value())
+                self._p2_cursor2_v.setPos(self._cursor2_v.value())
+            finally:
+                self._updating_cursors = False
+            self._emit_cursor_update()
+        def _on_p2_vcursor_moved():
+            if self._updating_cursors:
+                return
+            try:
+                self._updating_cursors = True
+                self._cursor1_v.setPos(self._p2_cursor1_v.value())
+                self._cursor2_v.setPos(self._p2_cursor2_v.value())
+            finally:
+                self._updating_cursors = False
+            self._emit_cursor_update()
+        try:
+            self._cursor1_v.sigPositionChanged.connect(_on_p1_vcursor_moved)
+            self._cursor2_v.sigPositionChanged.connect(_on_p1_vcursor_moved)
+            self._p2_cursor1_v.sigPositionChanged.connect(_on_p2_vcursor_moved)
+            self._p2_cursor2_v.sigPositionChanged.connect(_on_p2_vcursor_moved)
+            # Also emit on plot2 horizontal moves to refresh any UI if needed
+            self._p2_cursor1_h.sigPositionChanged.connect(self._emit_cursor_update)
+            self._p2_cursor2_h.sigPositionChanged.connect(self._emit_cursor_update)
+        except Exception:
+            pass
+
         # safe defaults
         self.set_groups(
             win1_groups=[("CH2","CH3"), ("CH4","CH5"), ("CH6","CH7")],
@@ -1256,6 +1391,64 @@ class TwoWindowPlot(QtWidgets.QWidget):
         )
 
     # ---------- public API ----------
+    def set_cursors_enabled(self, enabled: bool):
+        self._cursors_enabled = bool(enabled)
+        for ln in (self._cursor1_v, self._cursor1_h, self._cursor2_v, self._cursor2_h):
+            ln.setVisible(self._cursors_enabled)
+        if self._cursors_enabled:
+            # On enable, place cursors at 1/3 and 2/3 of current x-range
+            try:
+                xr, yr = self.plot1.getViewBox().viewRange()
+                x1 = xr[0] + (xr[1] - xr[0]) * (1.0 / 3.0)
+                x2 = xr[0] + (xr[1] - xr[0]) * (2.0 / 3.0)
+                self._cursor1_v.setPos(x1)
+                self._cursor2_v.setPos(x2)
+            except Exception:
+                pass
+            self._emit_cursor_update()
+
+    def set_time_scale(self, sec_per_sample: float | None):
+        """Set base time scale (seconds per original sample). None resets to 1.0 (samples)."""
+        try:
+            self._sec_per_sample = float(sec_per_sample) if sec_per_sample and sec_per_sample > 0 else 1.0
+        except Exception:
+            self._sec_per_sample = 1.0
+
+    def set_cursors2_enabled(self, enabled: bool):
+        self._cursors2_enabled = bool(enabled)
+        for ln in (self._p2_cursor1_v, self._p2_cursor1_h, self._p2_cursor2_v, self._p2_cursor2_h):
+            ln.setVisible(self._cursors2_enabled)
+        if self._cursors2_enabled:
+            # Prefer syncing to plot1 current cursor x positions if available
+            try:
+                x1 = float(self._cursor1_v.value())
+                x2 = float(self._cursor2_v.value())
+                self._p2_cursor1_v.setPos(x1)
+                self._p2_cursor2_v.setPos(x2)
+            except Exception:
+                try:
+                    xr, yr = self.plot2.getViewBox().viewRange()
+                    x1 = xr[0] + (xr[1] - xr[0]) * (1.0 / 3.0)
+                    x2 = xr[0] + (xr[1] - xr[0]) * (2.0 / 3.0)
+                    self._p2_cursor1_v.setPos(x1)
+                    self._p2_cursor2_v.setPos(x2)
+                except Exception:
+                    pass
+            self._emit_cursor_update()
+
+    def get_cursor_values(self):
+        """Return (x1, y1, x2, y2, dx, dy) for current cursor positions on plot1."""
+        try:
+            x1 = float(self._cursor1_v.value())
+            y1 = float(self._cursor1_h.value())
+            x2 = float(self._cursor2_v.value())
+            y2 = float(self._cursor2_h.value())
+        except Exception:
+            x1 = y1 = x2 = y2 = 0.0
+        dx = x2 - x1
+        dy = y2 - y1
+        return x1, y1, x2, y2, dx, dy
+
     def set_groups(
         self,
         win1_groups=None,
@@ -1445,6 +1638,25 @@ class TwoWindowPlot(QtWidgets.QWidget):
             return (xmin, xmax) if xmax > xmin else None
         except Exception:
             return None
+    
+    # ---------- internals ----------
+    def _emit_cursor_update(self, *args, **kwargs):
+        if not self._cursors_enabled:
+            return
+        x1, y1, x2, y2, dx, dy = self.get_cursor_values()
+        try:
+            self.cursorMoved.emit(x1, y1, x2, y2, dx, dy)
+        except Exception:
+            pass
+    
+    def get_plot2_y_values(self):
+        """Return y3, y4 for plot2 cursor horizontal lines."""
+        try:
+            y3 = float(self._p2_cursor1_h.value())
+            y4 = float(self._p2_cursor2_h.value())
+        except Exception:
+            y3 = y4 = 0.0
+        return y3, y4
     
     def plot_csv(self, csv_path: str, groups1, groups2, titles1=None, titles2=None, link_x=True, downsample_factor=1):
         # Get list of channels we need to plot
@@ -1711,13 +1923,19 @@ class TwoWindowPlot(QtWidgets.QWidget):
 
             # Build x-axis array
             n = len(df.index)
-            x_full = np.arange(n, dtype=np.float64) * downsample_factor  # Scale x-axis by downsample factor
+            # Scale x-axis by downsample factor and seconds per original sample (if set)
+            x_stride = float(downsample_factor) * float(getattr(self, "_sec_per_sample", 1.0))
+            x_full = np.arange(n, dtype=np.float64) * x_stride
             
             # Set dynamic x-limits to current data span to avoid overflow in ViewBox
             try:
                 x_min = 0.0
-                x_max = float((n - 1) * downsample_factor) if n > 0 else 1.0
+                # IMPORTANT: x axis is in seconds when time scaling is active.
+                # Use x_stride to compute limits in the same units as x_full.
+                x_max = float((n - 1) * x_stride) if n > 0 else 1.0
                 max_range = max(1.0, x_max - x_min)
+                # Allow zooming down to one-sample width (in seconds if time-scaled)
+                min_x_range = max(1e-9, float(downsample_factor) * float(getattr(self, "_sec_per_sample", 1.0)))
                 # Compute y-limits from the columns we are about to plot
                 used_names = {name for (_wid, name) in self._curves.keys()} & set(df.columns)
                 if used_names:
@@ -1740,7 +1958,7 @@ class TwoWindowPlot(QtWidgets.QWidget):
                     min_y_range, max_y_range = 1e-6, 1.0
                 for vb in (self.plot1.getViewBox(), self.plot2.getViewBox()):
                     vb.setLimits(
-                        xMin=x_min, xMax=x_max, minXRange=1.0, maxXRange=max_range,
+                        xMin=x_min, xMax=x_max, minXRange=min_x_range, maxXRange=max_range,
                         yMin=y_min, yMax=y_max, minYRange=min_y_range, maxYRange=max_y_range
                     )
             except Exception:
@@ -1839,6 +2057,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.csv_sequence_finished = False  # Flag to track if sequence has finished
         self.csv_sequence_started = False  # Flag to track if sequence was explicitly started
         self.csv_logging_started_auto = False  # Flag to track if logging was started automatically
+        self.csv_periodic_started_auto = False  # Flag to track if periodic send was started automatically
 
         # ============ Live plot buffers ============
         self.live_max_samples = 500  # default window size (adjustable)
@@ -3168,6 +3387,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.csv_request_value_label.setText("0")
                 self.csv_request_value_label.setStyleSheet("color: #666; font-weight: normal; min-width: 80px;")
             
+            # If we auto-started periodic send for the CSV sequence, stop it now
+            if getattr(self, "csv_periodic_started_auto", False):
+                if hasattr(self, "periodic_chk") and self.periodic_chk.isChecked():
+                    self.periodic_chk.setChecked(False)
+                self.csv_periodic_started_auto = False
+            
             self._set_status("CSV sequence stopped ✅")
             return
         
@@ -3176,6 +3401,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.csv_request_start_time = None
         self.csv_sequence_finished = False
         self.csv_sequence_started = True
+        
+        # Auto-start periodic control send if not already active (so CSV values get sent)
+        if hasattr(self, "periodic_timer") and not self.periodic_timer.isActive():
+            if hasattr(self, "periodic_chk"):
+                # Use the checkbox to go through the normal path (opens port, sets interval)
+                self.periodic_chk.setChecked(True)
+                self.csv_periodic_started_auto = True
+            else:
+                # Fallback: start timer directly at 50ms
+                self.periodic_timer.setInterval(50)
+                self.periodic_timer.start()
+                self.csv_periodic_started_auto = True
+        else:
+            self.csv_periodic_started_auto = False
         
         # Start logging if checkbox is checked and logging is not already active
         if hasattr(self, 'csv_log_with_sequence_chk') and self.csv_log_with_sequence_chk.isChecked():
@@ -3251,6 +3490,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self.csv_logging_started_auto and self.logging:
                     self._toggle_logging()
                     self.csv_logging_started_auto = False
+                
+                # If we auto-started periodic send for the CSV sequence, stop it now
+                if getattr(self, "csv_periodic_started_auto", False):
+                    if hasattr(self, "periodic_chk") and self.periodic_chk.isChecked():
+                        self.periodic_chk.setChecked(False)
+                    self.csv_periodic_started_auto = False
                 
                 self._set_status("CSV sequence finished ✅")
             return requests[-1]  # Return last value
@@ -3565,8 +3810,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.csv_request_value_label.setStyleSheet("color: #666; font-weight: normal; min-width: 80px;")
             
             # Use widget values
-        self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
-        self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
+            self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
+            self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
         
         self._ctrl_vals["mode"]         = int(self.ctrl_mode.currentData())
         self._ctrl_vals["inv_en"]       = 1 if self.ctrl_inverter_en.isChecked() else 0
@@ -3615,8 +3860,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.csv_request_value_label.setStyleSheet("color: #666; font-weight: normal; min-width: 80px;")
             
             # Use widget values
-        self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
-        self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
+            self._ctrl_vals["velocity_req"] = int(self.ctrl_velocity_req.value())
+            self._ctrl_vals["torque_req"]   = int(self.ctrl_torque_req.value())
         
         # Mode/enable are already staged on change, but we refresh anyway:
         self._ctrl_vals["mode"]   = int(self.ctrl_mode.currentData())
@@ -4050,6 +4295,18 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.linkx_chk = QtWidgets.QCheckBox("Link X"); self.linkx_chk.setChecked(True)
         ctrl.addWidget(self.linkx_chk)
+        # Cursors enable + readout
+        self.graph_cursors_chk = QtWidgets.QCheckBox("Cursors")
+        self.graph_cursors_chk.setChecked(False)
+        self.graph_cursors_chk.toggled.connect(self._on_graph_cursors_toggled)
+        ctrl.addWidget(self.graph_cursors_chk)
+        self.graph_cursors2_chk = QtWidgets.QCheckBox("Cursors P2")
+        self.graph_cursors2_chk.setChecked(False)
+        self.graph_cursors2_chk.toggled.connect(self._on_graph_cursors2_toggled)
+        ctrl.addWidget(self.graph_cursors2_chk)
+        self.graph_cursor_info = QtWidgets.QLabel("C1: x=–, y=–    C2: x=–, y=–    Δx=–, Δy=–")
+        self.graph_cursor_info.setVisible(False)
+        ctrl.addWidget(self.graph_cursor_info)
         ctrl.addStretch(1)
         v.addLayout(ctrl)
 
@@ -4136,8 +4393,54 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.two_plot.zoom_fit(),
                     self.two_plot.set_zoom_mode("none"))
         )
+        # Wire cursor updates to label
+        try:
+            self.two_plot.cursorMoved.connect(self._update_cursor_info_label)
+        except Exception:
+            pass
         v.addWidget(self.two_plot)
         self.tabs.addTab(w, "Graph")
+
+    def _on_graph_cursors_toggled(self, checked: bool):
+        try:
+            self.two_plot.set_cursors_enabled(bool(checked))
+        except Exception:
+            pass
+        # Show/hide readout
+        self.graph_cursor_info.setVisible(bool(checked))
+        if checked:
+            try:
+                x1, y1, x2, y2, dx, dy = self.two_plot.get_cursor_values()
+                self._update_cursor_info_label(x1, y1, x2, y2, dx, dy)
+            except Exception:
+                pass
+
+    def _on_graph_cursors2_toggled(self, checked: bool):
+        try:
+            self.two_plot.set_cursors2_enabled(bool(checked))
+        except Exception:
+            pass
+
+    def _update_cursor_info_label(self, x1: float, y1: float, x2: float, y2: float, dx: float, dy: float):
+        # Use compact formatting
+        def fmt(v):
+            try:
+                if abs(v) >= 1000 or (abs(v) > 0 and abs(v) < 0.001):
+                    return f"{v:.3e}"
+                return f"{v:.6f}".rstrip('0').rstrip('.') if '.' in f"{v:.6f}" else f"{v:.6f}"
+            except Exception:
+                return str(v)
+        # Also include y3, y4 from plot2 if available
+        y3 = y4 = None
+        try:
+            y3, y4 = self.two_plot.get_plot2_y_values()
+        except Exception:
+            pass
+        if y3 is not None and y4 is not None:
+            text = f"C1: x={fmt(x1)}, y={fmt(y1)}    C2: x={fmt(x2)}, y={fmt(y2)}    P2: y3={fmt(y3)}, y4={fmt(y4)}    Δx={fmt(dx)}, Δy={fmt(dy)}"
+        else:
+            text = f"C1: x={fmt(x1)}, y={fmt(y1)}    C2: x={fmt(x2)}, y={fmt(y2)}    Δx={fmt(dx)}, Δy={fmt(dy)}"
+        self.graph_cursor_info.setText(text)
 
     def _parse_group_str(self, s: str):
         out = []
@@ -4166,7 +4469,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             
             # Build CSV
-                self.dlogger.build_csv()
+            self.dlogger.build_csv()
             
             # Verify CSV was created
             if os.path.isfile(self.dlogger.csv_path):
@@ -4237,6 +4540,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("mode", "mode"),
             ("sensored_control", "sensored"),
             ("Fs_trq", "Fs_trq"),
+            ("data_logger_ts_div", "ts_div"),
             ("cc_trise", "cc_trise"),
             ("spdc_trise", "spdc_trise")
         ]
@@ -4310,6 +4614,8 @@ class MainWindow(QtWidgets.QMainWindow):
             
             # Update CSV info display
             self._update_csv_info_display(path, settings_dict, monitor_extras)
+            # Store for later (e.g., time scaling)
+            self.current_csv_settings = dict(settings_dict)
             
             self.available_channels = channel_cols
             self.current_csv_path = path
@@ -4433,6 +4739,31 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as monitor_err:
             print(f"DEBUG: Failed to parse #MONITOR block ({monitor_err})")
 
+        # Extract LOG parameters (e.g., data_logger_ts_div) assuming same columns as #SETTINGS
+        # and that #LOG appears after the end of the #SETTINGS section.
+        try:
+            found_log = False
+            found_ts = False
+            if settings_name_col_idx is not None:
+                # name column and optional value column
+                name_series = df_full.iloc[:, settings_name_col_idx].astype(str).str.strip()
+                value_col_exists = settings_value_col_idx < df_full.shape[1]
+                log_idx_arr = np.where(name_series.str.upper() == "#LOG")[0]
+                found_log = len(log_idx_arr) > 0
+                print(f"DEBUG: #LOG marker found (pandas search): {found_log}")
+                if found_log:
+                    r = int(log_idx_arr[0])
+                    rr = r + 1
+                    if rr < len(df_full):
+                        name2 = str(df_full.iloc[rr, settings_name_col_idx]).strip()
+                        val2 = str(df_full.iloc[rr, settings_value_col_idx]).strip() if value_col_exists else ""
+                        if name2.lower() == "data_logger_ts_div" and val2:
+                            settings_dict["data_logger_ts_div"] = val2
+                            found_ts = True
+                print(f"DEBUG: data_logger_ts_div under #LOG found: {found_ts}")
+        except Exception as e:
+            print(f"DEBUG: Failed to parse #LOG via pandas-column search ({e})")
+
         mode_val = monitor_extras.get("mode") or monitor_extras.get("Mode")
         vdc_val = monitor_extras.get("Vdc") or monitor_extras.get("VDC")
         #print(f"DEBUG: monitor mode extracted -> {mode_val}")
@@ -4550,6 +4881,37 @@ class MainWindow(QtWidgets.QMainWindow):
         #print(f"DEBUG: _plot_csv_path: dropdown currentData = {self.csv_downsample_combo.currentData()}, using downsample_factor = {downsample_factor}")
 
         linkx = self.linkx_chk.isChecked()
+        # Apply time scaling if csv contains data_logger_ts_div and Fs_trq
+        settings_dict = getattr(self, "current_csv_settings", {}) or {}
+        def _safe_float(val):
+            try:
+                s = str(val).strip()
+                if s == "" or s.lower() == "nan":
+                    return None
+                return float(s)
+            except Exception:
+                return None
+        ts_div = _safe_float(settings_dict.get("data_logger_ts_div"))
+        fs_trq = _safe_float(settings_dict.get("Fs_trq"))
+        # Debug info
+        print(f"DEBUG: ts_div(raw)={settings_dict.get('data_logger_ts_div')}, fs_trq(raw)={settings_dict.get('Fs_trq')} -> ts_div={ts_div}, fs_trq={fs_trq}")
+        # Fallback: if missing, try parsing CSV settings again now
+        if (ts_div is None or fs_trq is None) and path:
+            try:
+                re_settings, _ = self._parse_csv_settings(path)
+                if re_settings:
+                    self.current_csv_settings = dict(re_settings)
+                    ts_div = _safe_float(re_settings.get("data_logger_ts_div")) if ts_div is None else ts_div
+                    fs_trq = _safe_float(re_settings.get("Fs_trq")) if fs_trq is None else fs_trq
+                    print(f"DEBUG: reparsed settings -> ts_div={ts_div}, fs_trq={fs_trq}")
+            except Exception as _reparse_err:
+                print(f"DEBUG: reparse failed: {_reparse_err}")
+        if ts_div is not None and ts_div > 0 and fs_trq is not None and fs_trq > 0:
+            sec_per_sample = ts_div / (fs_trq * 1000.0)
+            self.two_plot.set_time_scale(sec_per_sample)
+        else:
+            # Fallback to samples
+            self.two_plot.set_time_scale(1.0)
         try:
             self.two_plot.plot_csv(path, g1, g2, t1, t2, linkx, downsample_factor)
             self._set_status(f"Opened: {os.path.basename(path)} ✅")
