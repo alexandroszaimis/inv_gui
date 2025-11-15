@@ -2089,6 +2089,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pending_live_plot_values = None
         self._live_plot_update_interval_ms = 33  # Update plots at most every 33ms (~30 Hz)
         self._last_status_text = ("", "")  # Cache status text to avoid unnecessary updates
+        self._fft_windows = []  # Keep references to FFT dialogs to prevent GC
         
         # ============ CSV request profile ============
         self.csv_request_data = None  # List of (time, request) tuples
@@ -4402,6 +4403,13 @@ class MainWindow(QtWidgets.QMainWindow):
         for b in (self.graph_zoomx_btn, self.graph_zoomy_btn, self.graph_fit_btn):
             b.setCheckable(True)
             channel_selection_layout.addWidget(b)
+        # FFT buttons for Plot1 and Plot2
+        self.graph_fft_p1_btn = QtWidgets.QPushButton("FFT P1")
+        self.graph_fft_p2_btn = QtWidgets.QPushButton("FFT P2")
+        self.graph_fft_p1_btn.clicked.connect(self._on_fft_plot1)
+        self.graph_fft_p2_btn.clicked.connect(self._on_fft_plot2)
+        channel_selection_layout.addWidget(self.graph_fft_p1_btn)
+        channel_selection_layout.addWidget(self.graph_fft_p2_btn)
         # Cursors readout next to Fit View
         self.graph_cursor_info = QtWidgets.QLabel("C1: x=–, y=–    C2: x=–, y=–    Δx=–, Δy=–")
         self.graph_cursor_info.setVisible(False)
@@ -5049,6 +5057,420 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cursor_curve2_combo.blockSignals(False)
         # Refresh label with new selection
         self._refresh_cursor_readout()
+
+    def _on_fft_plot1(self):
+        try:
+            self._do_fft_for_plot(1)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "FFT", f"Failed to compute FFT for Plot1:\n{e}")
+
+    def _on_fft_plot2(self):
+        try:
+            self._do_fft_for_plot(2)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "FFT", f"Failed to compute FFT for Plot2:\n{e}")
+
+    def _do_fft_for_plot(self, win_id: int):
+        # Gather all currently displayed curves for this plot window
+        shown = []
+        try:
+            for (wid, name), curve in list(self.two_plot._curves.items()):
+                if wid != win_id:
+                    continue
+                try:
+                    x = curve.xData
+                    y = curve.yData
+                except Exception:
+                    x = None; y = None
+                if x is None or y is None:
+                    continue
+                if len(x) < 2 or len(y) < 2:
+                    continue
+                shown.append((name, np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)))
+        except Exception:
+            shown = []
+        if not shown:
+            QtWidgets.QMessageBox.information(self, "FFT", f"No displayed curves found in Plot{win_id}.")
+            return
+        # Compute common dt from the first curve's x axis
+        x0 = shown[0][1]
+        dx = np.diff(x0)
+        dt_est = float(np.median(dx[np.isfinite(dx)])) if dx.size else None
+        fs_fallback = (1.0 / dt_est) if (dt_est and dt_est > 0) else None
+        # Clean and determine a common length across all signals
+        cleaned = []
+        min_len = 10**9
+        for name, x, y in shown:
+            mask = np.isfinite(x) & np.isfinite(y)
+            x = x[mask]; y = y[mask]
+            min_len = min(min_len, int(y.size))
+            cleaned.append((name, x, y))
+        if min_len < 4:
+            QtWidgets.QMessageBox.information(self, "FFT", f"Not enough samples for FFT (need >= 4).")
+            return
+        # Prepare window and freq axis using the common length
+        n = int(min_len)
+        window = np.hanning(n)
+        name_to_mag = {}
+        name_to_xy = {}
+        for name, _x, y in cleaned:
+            yy = y[:n]
+            yy = yy - np.nanmean(yy)
+            yy *= window
+            spec = np.fft.rfft(yy)
+            cg = float(np.sum(window)) / float(n) if n > 0 else 1.0
+            if not np.isfinite(cg) or cg <= 0:
+                cg = 1.0
+            mag = (2.0 / (n * cg)) * np.abs(spec)
+            name_to_mag[name] = mag
+        for name, x, y in cleaned:
+            name_to_xy[name] = (x, y)
+        title = f"FFT — P{win_id}"
+        # Snapshot current visible x-range from the source plot
+        try:
+            vb = (self.two_plot.plot1 if win_id == 1 else self.two_plot.plot2).getViewBox()
+            xr = vb.viewRange()[0]
+            visible_range = (float(xr[0]), float(xr[1]))
+        except Exception:
+            visible_range = None
+        self._show_multi_fft_window_dynamic(n, name_to_mag, fs_fallback, title, name_to_xy, visible_range)
+
+    def _show_fft_window(self, freqs, mag, title: str):
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        lay = QtWidgets.QVBoxLayout(dlg)
+        pw = pg.PlotWidget()
+        pw.showGrid(x=True, y=True)
+        pw.setLabel('bottom', 'Frequency', units='Hz')
+        pw.setLabel('left', 'Amplitude')
+        pw.plot(freqs, mag, pen=pg.mkPen('#1e90ff', width=1.5))
+        lay.addWidget(pw)
+        dlg.resize(900, 450)
+        dlg.show()
+        # Keep a reference to prevent garbage collection
+        self._fft_windows.append(dlg)
+
+    def _show_multi_fft_window_dynamic(self, n: int, name_to_mag: dict, fs_fallback: float | None, title: str, name_to_xy: dict | None = None, visible_x_range: tuple | None = None):
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        vbox = QtWidgets.QVBoxLayout(dlg)
+        # Controls
+        ctrl = QtWidgets.QHBoxLayout()
+        auto_chk = QtWidgets.QCheckBox("Auto")
+        fs_label = QtWidgets.QLabel("Fs (Hz):")
+        fs_spin = QtWidgets.QDoubleSpinBox()
+        fs_spin.setDecimals(6)
+        fs_spin.setRange(1e-9, 1e12)
+        fs_spin.setSingleStep(1.0)
+        fs_spin.setValue(1000.0)
+        ctrl.addWidget(auto_chk)
+        ctrl.addSpacing(10)
+        ctrl.addWidget(fs_label)
+        ctrl.addWidget(fs_spin)
+        ctrl.addSpacing(10)
+        use_vis_chk = QtWidgets.QCheckBox("Use visible window")
+        use_vis_chk.setChecked(False)
+        ctrl.addWidget(use_vis_chk)
+        ctrl.addStretch(1)
+        vbox.addLayout(ctrl)
+        # Plot
+        pw = pg.PlotWidget()
+        pw.showGrid(x=True, y=True)
+        pw.setLabel('bottom', 'Frequency', units='Hz')
+        pw.setLabel('left', 'Amplitude')
+        if pw.plotItem.legend is None:
+            pw.addLegend()
+        vbox.addWidget(pw)
+        # Zoom + cursors controls
+        ctrl2 = QtWidgets.QHBoxLayout()
+        zoomx_btn = QtWidgets.QPushButton("Zoom X")
+        zoomy_btn = QtWidgets.QPushButton("Zoom Y")
+        fit_btn  = QtWidgets.QPushButton("Fit View")
+        for b in (zoomx_btn, zoomy_btn, fit_btn):
+            b.setCheckable(True)
+            ctrl2.addWidget(b)
+        ctrl2.addSpacing(12)
+        cursors_chk = QtWidgets.QCheckBox("Cursors")
+        ctrl2.addWidget(cursors_chk)
+        ctrl2.addSpacing(8)
+        ctrl2.addWidget(QtWidgets.QLabel("Track:"))
+        track_combo = QtWidgets.QComboBox()
+        track_combo.addItems(list(name_to_mag.keys()))
+        if track_combo.count() > 0:
+            track_combo.setCurrentIndex(0)
+        ctrl2.addWidget(track_combo)
+        ctrl2.addSpacing(12)
+        ctrl2.addWidget(QtWidgets.QLabel("Magnitude:"))
+        mag_mode_combo = QtWidgets.QComboBox()
+        mag_mode_combo.addItems(["Absolute", "Log (dB)"])
+        mag_mode_combo.setCurrentIndex(0)
+        ctrl2.addWidget(mag_mode_combo)
+        ctrl2.addSpacing(12)
+        cursor_info = QtWidgets.QLabel("C1: f=–, A=–    C2: f=–, A=–    Δf=–, ΔA=–")
+        cursor_info.setVisible(False)
+        ctrl2.addWidget(cursor_info)
+        ctrl2.addStretch(1)
+        vbox.addLayout(ctrl2)
+        # Crosshair cursors
+        cursor_pen_1 = pg.mkPen((255, 200, 0), width=1)
+        cursor_pen_2 = pg.mkPen((0, 200, 255), width=1)
+        c1_v = pg.InfiniteLine(angle=90, movable=True, pen=cursor_pen_1)
+        c1_h = pg.InfiniteLine(angle=0,  movable=True, pen=cursor_pen_1)
+        c2_v = pg.InfiniteLine(angle=90, movable=True, pen=cursor_pen_2)
+        c2_h = pg.InfiniteLine(angle=0,  movable=True, pen=cursor_pen_2)
+        for ln in (c1_v, c1_h, c2_v, c2_h):
+            try:
+                ln.setZValue(1_000_001)
+            except Exception:
+                pass
+            ln.hide()
+            pw.addItem(ln)
+        # Track evaluation helper
+        def _eval_curve_at_x(freqs_arr, mags_arr, x_value):
+            try:
+                xv = float(x_value)
+                if freqs_arr is None or mags_arr is None or len(freqs_arr) == 0:
+                    return None
+                x0 = float(freqs_arr[0]); xN = float(freqs_arr[-1])
+                if xv <= x0:
+                    return float(mags_arr[0])
+                if xv >= xN:
+                    return float(mags_arr[-1])
+                return float(np.interp(xv, np.asarray(freqs_arr, dtype=float), np.asarray(mags_arr, dtype=float)))
+            except Exception:
+                return None
+        # Zoom helpers
+        def _set_zoom_mode(mode: str):
+            vb = pw.getViewBox()
+            xr, yr = vb.viewRange()
+            if mode == "x":
+                zoomx_btn.setChecked(True); zoomy_btn.setChecked(False); fit_btn.setChecked(False)
+                vb.setMouseMode(pg.ViewBox.RectMode)
+                vb.disableAutoRange()
+                vb.setXRange(xr[0], xr[1], padding=0)
+                vb.setYRange(yr[0], yr[1], padding=0)
+                vb.setMouseEnabled(x=True, y=False)
+            elif mode == "y":
+                zoomx_btn.setChecked(False); zoomy_btn.setChecked(True); fit_btn.setChecked(False)
+                vb.setMouseMode(pg.ViewBox.RectMode)
+                vb.disableAutoRange()
+                vb.setXRange(xr[0], xr[1], padding=0)
+                vb.setYRange(yr[0], yr[1], padding=0)
+                vb.setMouseEnabled(x=False, y=True)
+            else:
+                zoomx_btn.setChecked(False); zoomy_btn.setChecked(False); fit_btn.setChecked(False)
+                vb.enableAutoRange(axis=pg.ViewBox.XYAxes)
+                vb.autoRange()
+                vb.setMouseEnabled(x=True, y=True)
+        zoomx_btn.clicked.connect(lambda: _set_zoom_mode("x"))
+        zoomy_btn.clicked.connect(lambda: _set_zoom_mode("y"))
+        fit_btn.clicked.connect(lambda: _set_zoom_mode("none"))
+        # Create curve objects
+        name_to_curve = {}
+        for name, mag in name_to_mag.items():
+            try:
+                pen = self.two_plot._pen_for(name)
+            except Exception:
+                pen = pg.mkPen('#1e90ff', width=1.5)
+            c = pw.plot([], [], name=name, pen=pen)
+            name_to_curve[name] = c
+        # Magnitude transform helper
+        def _transform_mag(arr):
+            mode = mag_mode_combo.currentIndex()
+            if mode == 0:
+                return arr
+            # Log magnitude in dB
+            return 20.0 * np.log10(np.maximum(np.asarray(arr, dtype=np.float64), 1e-15))
+        # Active spectrum cache (may switch between full and visible window)
+        active_mag = [dict(name_to_mag)]
+        current_n = [int(n)]
+        # Cursor toggle
+        def _on_cursors_toggled(checked: bool):
+            for ln in (c1_v, c1_h, c2_v, c2_h):
+                ln.setVisible(bool(checked))
+            cursor_info.setVisible(bool(checked))
+            if checked:
+                try:
+                    vb = pw.getViewBox()
+                    xr, yr = vb.viewRange()
+                    x1 = xr[0] + (xr[1] - xr[0]) * (1.0 / 3.0)
+                    x2 = xr[0] + (xr[1] - xr[0]) * (2.0 / 3.0)
+                    y1 = yr[0] + (yr[1] - yr[0]) * 0.5
+                    y2 = y1
+                except Exception:
+                    x1, x2, y1, y2 = 0.0, 1.0, 0.0, 0.0
+                c1_v.setPos(x1); c2_v.setPos(x2); c1_h.setPos(y1); c2_h.setPos(y2)
+                _refresh_cursor_readout()
+        cursors_chk.toggled.connect(_on_cursors_toggled)
+        # Compute auto Fs availability and value
+        settings_dict = getattr(self, "current_csv_settings", {}) or {}
+        def _safe_float(val):
+            try:
+                s = str(val).strip()
+                if s == "" or s.lower() == "nan":
+                    return None
+                return float(s)
+            except Exception:
+                return None
+        ts_div = _safe_float(settings_dict.get("data_logger_ts_div"))
+        fs_trq = _safe_float(settings_dict.get("Fs_trq"))
+        downsample_ratio = None
+        try:
+            downsample_ratio = self.csv_downsample_combo.currentData()
+        except Exception:
+            downsample_ratio = None
+        if not downsample_ratio or downsample_ratio <= 0:
+            downsample_ratio = 1
+        auto_available = bool(ts_div and ts_div > 0 and fs_trq and fs_trq > 0)
+        auto_fs = (fs_trq*1000 / (ts_div * downsample_ratio)) if auto_available else None
+        # Default states
+        if auto_available:
+            auto_chk.setChecked(True)
+            fs_spin.setValue(float(auto_fs))
+        else:
+            auto_chk.setChecked(False)
+            if fs_fallback and fs_fallback > 0:
+                fs_spin.setValue(float(fs_fallback))
+        # Updater
+        current_freqs = [None]  # boxed for closure
+        def update_plot_from_fs():
+            fs = None
+            if auto_chk.isChecked():
+                if not auto_available:
+                    QtWidgets.QMessageBox.information(dlg, "FFT", "Auto Fs is not available from CSV; please enter Fs manually.")
+                    auto_chk.blockSignals(True)
+                    auto_chk.setChecked(False)
+                    auto_chk.blockSignals(False)
+                else:
+                    fs_spin.blockSignals(True)
+                    fs_spin.setValue(float(auto_fs))
+                    fs_spin.blockSignals(False)
+                    fs = float(auto_fs)
+            if fs is None:
+                fs = float(fs_spin.value())
+            if fs <= 0:
+                return
+            freqs = np.fft.rfftfreq(current_n[0], d=1.0/float(fs))
+            current_freqs[0] = freqs
+            for name, curve in name_to_curve.items():
+                mag = active_mag[0].get(name)
+                if mag is None or len(mag) == 0:
+                    curve.setData([], [])
+                else:
+                    curve.setData(freqs, _transform_mag(mag))
+            _refresh_cursor_readout()
+        auto_chk.toggled.connect(update_plot_from_fs)
+        fs_spin.valueChanged.connect(update_plot_from_fs)
+        # Update magnitude mode
+        def update_mag_mode():
+            # Update y-axis label
+            if mag_mode_combo.currentIndex() == 0:
+                pw.setLabel('left', 'Amplitude')
+            else:
+                pw.setLabel('left', 'Magnitude (dB)')
+            # Re-apply current data with transform
+            freqs_arr = current_freqs[0]
+            if freqs_arr is None:
+                return
+            for name, curve in name_to_curve.items():
+                mag = active_mag[0].get(name)
+                if mag is None or len(mag) == 0:
+                    curve.setData([], [])
+                else:
+                    curve.setData(freqs_arr, _transform_mag(mag))
+            _refresh_cursor_readout()
+        mag_mode_combo.currentIndexChanged.connect(lambda _ix: update_mag_mode())
+        # Visible window recompute
+        def recompute_visible_if_needed():
+            if not use_vis_chk.isChecked() or not name_to_xy or not visible_x_range:
+                active_mag[0] = dict(name_to_mag)
+                current_n[0] = int(n)
+                update_plot_from_fs()
+                return
+            xmin, xmax = visible_x_range
+            # Build per-signal segment arrays within [xmin, xmax]
+            segs = {}
+            min_len_local = 10**9
+            for name, (x, y) in name_to_xy.items():
+                try:
+                    mask = (x >= xmin) & (x <= xmax) & np.isfinite(x) & np.isfinite(y)
+                    yy = y[mask]
+                except Exception:
+                    yy = np.array([], dtype=float)
+                min_len_local = min(min_len_local, int(yy.size))
+                segs[name] = yy
+            if min_len_local < 4:
+                # Not enough points; clear spectra
+                active_mag[0] = {k: np.array([], dtype=float) for k in name_to_curve.keys()}
+                current_n[0] = 4
+                update_plot_from_fs()
+                return
+            nn = int(min_len_local)
+            current_n[0] = nn
+            win = np.hanning(nn)
+            new_mag = {}
+            for name, yy in segs.items():
+                ycut = yy[:nn]
+                ycut = ycut - np.nanmean(ycut)
+                ycut *= win
+                spec = np.fft.rfft(ycut)
+                cg = float(np.sum(win)) / float(nn) if nn > 0 else 1.0
+                if not np.isfinite(cg) or cg <= 0:
+                    cg = 1.0
+                new_mag[name] = (2.0 / (nn * cg)) * np.abs(spec)
+            active_mag[0] = new_mag
+            update_plot_from_fs()
+        use_vis_chk.toggled.connect(recompute_visible_if_needed)
+        # Cursor readout
+        def _refresh_cursor_readout():
+            if not cursor_info.isVisible():
+                return
+            freqs_arr = current_freqs[0]
+            if freqs_arr is None or freqs_arr.size == 0:
+                cursor_info.setText("C1: f=–, A=–    C2: f=–, A=–    Δf=–, ΔA=–")
+                return
+            try:
+                x1 = float(c1_v.value()); x2 = float(c2_v.value())
+                y1 = float(c1_h.value()); y2 = float(c2_h.value())
+            except Exception:
+                x1 = x2 = y1 = y2 = 0.0
+            name = track_combo.currentText().strip()
+            mag_arr = active_mag[0].get(name)
+            if mag_arr is None:
+                y1_eval = y2_eval = float('nan')
+            else:
+                transformed = _transform_mag(mag_arr)
+                y1_eval = _eval_curve_at_x(freqs_arr, transformed, x1)
+                y2_eval = _eval_curve_at_x(freqs_arr, transformed, x2)
+            def fmt(v):
+                try:
+                    if v is None or not np.isfinite(v):
+                        return "–"
+                    if abs(v) >= 1000 or (abs(v) > 0 and abs(v) < 0.001):
+                        return f"{v:.3e}"
+                    return f"{v:.6g}"
+                except Exception:
+                    return "–"
+            df = x2 - x1
+            dy = (y2_eval - y1_eval) if (y1_eval is not None and y2_eval is not None and np.isfinite(y1_eval) and np.isfinite(y2_eval)) else float('nan')
+            cursor_info.setText(f"C1: f={fmt(x1)}, A={fmt(y1_eval)}    C2: f={fmt(x2)}, A={fmt(y2_eval)}    Δf={fmt(df)}, ΔA={fmt(dy)}")
+        try:
+            c1_v.sigPositionChanged.connect(_refresh_cursor_readout)
+            c1_h.sigPositionChanged.connect(_refresh_cursor_readout)
+            c2_v.sigPositionChanged.connect(_refresh_cursor_readout)
+            c2_h.sigPositionChanged.connect(_refresh_cursor_readout)
+        except Exception:
+            pass
+        track_combo.currentIndexChanged.connect(lambda _ix: _refresh_cursor_readout())
+        # Initial render
+        # Initial render
+        recompute_visible_if_needed()
+        update_mag_mode()
+        dlg.resize(1000, 520)
+        dlg.show()
+        self._fft_windows.append(dlg)
 
 
     # ---------------- Logging (shared port) ----------------
