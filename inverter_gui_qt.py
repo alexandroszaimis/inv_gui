@@ -236,7 +236,10 @@ LOG_TABLE_VARIABLES = [
     ("Vdc", "f32"),
     ("TIM1_CCR1", "u16"),
     ("TIM1_CCR2", "u16"),
-    ("TIM1_CCR3", "u16")
+    ("TIM1_CCR3", "u16"),
+    ("dtc_sw_table1", "u16"),
+    ("dtc_sw_table2", "u16"),
+    ("dtc_sw_table3", "u16")
    
 ]
 
@@ -1448,6 +1451,43 @@ class TwoWindowPlot(QtWidgets.QWidget):
         dx = x2 - x1
         dy = y2 - y1
         return x1, y1, x2, y2, dx, dy
+    
+    # ----- curve access helpers for cursor tracking -----
+    def get_plot_curve_names(self, win_id: int) -> list[str]:
+        names = []
+        for (wid, name), _curve in self._curves.items():
+            if wid == win_id:
+                names.append(name)
+        return names
+
+    def _get_curve_xy(self, win_id: int, name: str):
+        key = (win_id, name)
+        curve = self._curves.get(key)
+        if curve is None:
+            return None, None
+        try:
+            return curve.xData, curve.yData
+        except Exception:
+            return None, None
+
+    def eval_curve_at_x(self, win_id: int, name: str, x_value: float):
+        """Linearly interpolate y for given curve at x_value. Returns float or None."""
+        try:
+            x, y = self._get_curve_xy(win_id, name)
+            if x is None or y is None or len(x) == 0 or len(y) == 0:
+                return None
+            # Ensure monotonic x (it should be)
+            import numpy as _np
+            xv = float(x_value)
+            # Clamp to range to avoid NaN
+            x0 = float(x[0]); xN = float(x[-1])
+            if xv <= x0:
+                return float(y[0])
+            if xv >= xN:
+                return float(y[-1])
+            return float(_np.interp(xv, _np.asarray(x, dtype=float), _np.asarray(y, dtype=float)))
+        except Exception:
+            return None
 
     def set_groups(
         self,
@@ -4304,9 +4344,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.graph_cursors2_chk.setChecked(False)
         self.graph_cursors2_chk.toggled.connect(self._on_graph_cursors2_toggled)
         ctrl.addWidget(self.graph_cursors2_chk)
-        self.graph_cursor_info = QtWidgets.QLabel("C1: x=–, y=–    C2: x=–, y=–    Δx=–, Δy=–")
-        self.graph_cursor_info.setVisible(False)
-        ctrl.addWidget(self.graph_cursor_info)
+        # Cursor tracking dropdowns
+        ctrl.addWidget(QtWidgets.QLabel("Track P1:"))
+        self.cursor_curve1_combo = QtWidgets.QComboBox()
+        self.cursor_curve1_combo.setMinimumWidth(140)
+        self.cursor_curve1_combo.currentIndexChanged.connect(lambda _ix: self._refresh_cursor_readout())
+        ctrl.addWidget(self.cursor_curve1_combo)
+        ctrl.addWidget(QtWidgets.QLabel("Track P2:"))
+        self.cursor_curve2_combo = QtWidgets.QComboBox()
+        self.cursor_curve2_combo.setMinimumWidth(140)
+        self.cursor_curve2_combo.currentIndexChanged.connect(lambda _ix: self._refresh_cursor_readout())
+        ctrl.addWidget(self.cursor_curve2_combo)
         ctrl.addStretch(1)
         v.addLayout(ctrl)
 
@@ -4354,6 +4402,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for b in (self.graph_zoomx_btn, self.graph_zoomy_btn, self.graph_fit_btn):
             b.setCheckable(True)
             channel_selection_layout.addWidget(b)
+        # Cursors readout next to Fit View
+        self.graph_cursor_info = QtWidgets.QLabel("C1: x=–, y=–    C2: x=–, y=–    Δx=–, Δy=–")
+        self.graph_cursor_info.setVisible(False)
+        channel_selection_layout.addWidget(self.graph_cursor_info)
         
         # Loading progress bar (initially hidden)
         self.csv_loading_progress = QtWidgets.QProgressBar()
@@ -4408,6 +4460,8 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         # Show/hide readout
         self.graph_cursor_info.setVisible(bool(checked))
+        self.cursor_curve1_combo.setVisible(bool(checked))
+        self.cursor_curve2_combo.setVisible(bool(checked))
         if checked:
             try:
                 x1, y1, x2, y2, dx, dy = self.two_plot.get_cursor_values()
@@ -4430,17 +4484,43 @@ class MainWindow(QtWidgets.QMainWindow):
                 return f"{v:.6f}".rstrip('0').rstrip('.') if '.' in f"{v:.6f}" else f"{v:.6f}"
             except Exception:
                 return str(v)
-        # Also include y3, y4 from plot2 if available
+        # Evaluate y from selected curves at cursor x positions
+        y1_eval = y2_eval = None
         y3 = y4 = None
         try:
-            y3, y4 = self.two_plot.get_plot2_y_values()
+            name1 = self.cursor_curve1_combo.currentText().strip()
+            if name1:
+                y1_eval = self.two_plot.eval_curve_at_x(1, name1, x1)
+                y2_eval = self.two_plot.eval_curve_at_x(1, name1, x2)
         except Exception:
             pass
+        try:
+            name2 = self.cursor_curve2_combo.currentText().strip()
+            if name2:
+                y3 = self.two_plot.eval_curve_at_x(2, name2, x1)
+                y4 = self.two_plot.eval_curve_at_x(2, name2, x2)
+        except Exception:
+            pass
+        # Fallbacks to horizontal values only if interpolation failed
+        if y1_eval is None:
+            y1_eval = y1
+        if y2_eval is None:
+            y2_eval = y2
+        dy_eval = (y2_eval - y1_eval) if (y1_eval is not None and y2_eval is not None) else dy
+        # Compose label
         if y3 is not None and y4 is not None:
-            text = f"C1: x={fmt(x1)}, y={fmt(y1)}    C2: x={fmt(x2)}, y={fmt(y2)}    P2: y3={fmt(y3)}, y4={fmt(y4)}    Δx={fmt(dx)}, Δy={fmt(dy)}"
+            dy2 = y4 - y3
+            text = f"C1: x={fmt(x1)}, y={fmt(y1_eval)}    C2: x={fmt(x2)}, y={fmt(y2_eval)}    P2: y3={fmt(y3)}, y4={fmt(y4)}, Δy2={fmt(dy2)}    Δx={fmt(dx)}, Δy={fmt(dy_eval)}"
         else:
-            text = f"C1: x={fmt(x1)}, y={fmt(y1)}    C2: x={fmt(x2)}, y={fmt(y2)}    Δx={fmt(dx)}, Δy={fmt(dy)}"
+            text = f"C1: x={fmt(x1)}, y={fmt(y1_eval)}    C2: x={fmt(x2)}, y={fmt(y2_eval)}    Δx={fmt(dx)}, Δy={fmt(dy_eval)}"
         self.graph_cursor_info.setText(text)
+
+    def _refresh_cursor_readout(self):
+        try:
+            x1, y1, x2, y2, dx, dy = self.two_plot.get_cursor_values()
+            self._update_cursor_info_label(x1, y1, x2, y2, dx, dy)
+        except Exception:
+            pass
 
     def _parse_group_str(self, s: str):
         out = []
@@ -4847,6 +4927,11 @@ class MainWindow(QtWidgets.QMainWindow):
         """Called when channel selection changes in CSV plot combos."""
         if self.current_csv_path:
             self._plot_csv_path(self.current_csv_path)
+        # Update cursor tracking combos after channels change
+        try:
+            self._populate_cursor_track_combos()
+        except Exception:
+            pass
 
 
     def _plot_csv_path(self, path: str):
@@ -4915,6 +5000,8 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self.two_plot.plot_csv(path, g1, g2, t1, t2, linkx, downsample_factor)
             self._set_status(f"Opened: {os.path.basename(path)} ✅")
+            # Refresh cursor tracking dropdowns with plotted curve names
+            self._populate_cursor_track_combos()
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "CSV", f"Failed to plot:\n{e}")
 
@@ -4930,6 +5017,38 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.two_plot._cached_csv_path = None
             # Reload and replot
             self._plot_csv_path(self.current_csv_path)
+
+    def _populate_cursor_track_combos(self):
+        try:
+            names1 = self.two_plot.get_plot_curve_names(1)
+            names2 = self.two_plot.get_plot_curve_names(2)
+        except Exception:
+            names1, names2 = [], []
+        # Preserve selections if possible
+        sel1 = self.cursor_curve1_combo.currentText() if hasattr(self, "cursor_curve1_combo") else ""
+        sel2 = self.cursor_curve2_combo.currentText() if hasattr(self, "cursor_curve2_combo") else ""
+        # Update items
+        if hasattr(self, "cursor_curve1_combo"):
+            self.cursor_curve1_combo.blockSignals(True)
+            self.cursor_curve1_combo.clear()
+            self.cursor_curve1_combo.addItems(names1)
+            # Restore selection or default to first
+            if sel1 and sel1 in names1:
+                self.cursor_curve1_combo.setCurrentText(sel1)
+            elif names1:
+                self.cursor_curve1_combo.setCurrentIndex(0)
+            self.cursor_curve1_combo.blockSignals(False)
+        if hasattr(self, "cursor_curve2_combo"):
+            self.cursor_curve2_combo.blockSignals(True)
+            self.cursor_curve2_combo.clear()
+            self.cursor_curve2_combo.addItems(names2)
+            if sel2 and sel2 in names2:
+                self.cursor_curve2_combo.setCurrentText(sel2)
+            elif names2:
+                self.cursor_curve2_combo.setCurrentIndex(0)
+            self.cursor_curve2_combo.blockSignals(False)
+        # Refresh label with new selection
+        self._refresh_cursor_readout()
 
 
     # ---------------- Logging (shared port) ----------------
