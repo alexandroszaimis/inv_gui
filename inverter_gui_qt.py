@@ -885,6 +885,30 @@ class MultiSelectCombo(QtWidgets.QComboBox):
             self._model.appendRow(it)
         self._refresh_text()
 
+    def append_items(self, items):
+        """Append new items if they don't already exist."""
+        existing = set(self._model.item(i).text() for i in range(self._model.rowCount()))
+        for name in items:
+            if name in existing:
+                continue
+            it = QtGui.QStandardItem(name)
+            it.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled)
+            it.setData(QtCore.Qt.Unchecked, QtCore.Qt.CheckStateRole)
+            self._model.appendRow(it)
+        self._refresh_text()
+
+    def set_checked_by_texts(self, texts, checked=True, preserve_others=True):
+        """Set check-state for items whose text is in texts."""
+        want = set(texts or [])
+        for i in range(self._model.rowCount()):
+            it = self._model.item(i)
+            t = it.text()
+            if t in want:
+                it.setCheckState(QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
+            elif not preserve_others:
+                it.setCheckState(QtCore.Qt.Unchecked)
+        self._refresh_text()
+
     def _on_index_pressed(self, index):
         item = self._model.itemFromIndex(index)
         st = QtCore.Qt.Checked if item.checkState() == QtCore.Qt.Unchecked else QtCore.Qt.Unchecked
@@ -1239,6 +1263,9 @@ class TwoWindowPlot(QtWidgets.QWidget):
             pw.setDownsampling(auto=True)      # let pg decimate while drawing
             pw.setClipToView(True)
             pw.plotItem.setMouseEnabled(x=True, y=True)
+
+        # Additional overlay curves (from extra CSVs) are tracked here
+        self._overlay_items = []  # list of PlotDataItem
 
         # Add horizontal zero reference lines so users can compare signals to 0
         try:
@@ -2056,6 +2083,51 @@ class TwoWindowPlot(QtWidgets.QWidget):
             self._ch_pen[name] = pg.mkPen(self._palette[idx], width=1.2)
         return self._ch_pen[name]
 
+    # ---------- overlays (additional CSVs) ----------
+    def add_overlay_curves(self, win1_data: dict, win2_data: dict, label: str | None = None):
+        """Add additional curves to plot1/plot2 without disturbing base groups.
+        win*_data maps channel -> (x_array_in_seconds, y_array).
+        """
+        lab = f" ({label})" if label else ""
+        # Plot1
+        for name, xy in (win1_data or {}).items():
+            try:
+                x, y = xy
+                pen = self._pen_for(f"{name}{lab}")
+            except Exception:
+                x, y = [], []
+                pen = pg.mkPen('#888', width=1.2)
+            item = self.plot1.plot(x=x, y=y, name=f"{name}{lab}", pen=pen, connect='finite', skipFiniteCheck=True)
+            self._overlay_items.append(item)
+        # Plot2
+        for name, xy in (win2_data or {}).items():
+            try:
+                x, y = xy
+                pen = self._pen_for(f"{name}{lab}")
+            except Exception:
+                x, y = [], []
+                pen = pg.mkPen('#888', width=1.2)
+            item = self.plot2.plot(x=x, y=y, name=f"{name}{lab}", pen=pen, connect='finite', skipFiniteCheck=True)
+            self._overlay_items.append(item)
+        # Keep zero lines above curves
+        try:
+            self._zero_line1.setZValue(1_000_000)
+            self._zero_line2.setZValue(1_000_000)
+        except Exception:
+            pass
+
+    def clear_overlays(self):
+        for it in list(self._overlay_items):
+            try:
+                self.plot1.removeItem(it)
+            except Exception:
+                pass
+            try:
+                self.plot2.removeItem(it)
+            except Exception:
+                pass
+        self._overlay_items.clear()
+
 
 # ----------------------- Main Window -----------------------
 class MainWindow(QtWidgets.QMainWindow):
@@ -2063,6 +2135,12 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("Inverter GUI — PySide6")
         self.resize(1400, 900)
+        # Registry for graph CSV datasets (1 = primary, 2+ = overlays)
+        self.dataset_count = 0
+        self.dataset_channels_by_id = {}
+        self.dataset_labels_by_id = {}
+        self.dataset_paths_by_id = {}
+        self.dataset_settings_by_id = {}
 
         self._recv_values = {}
 
@@ -4328,8 +4406,12 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_load_csv = QtWidgets.QPushButton("Load CSV…")
         btn_load_csv.clicked.connect(self._pick_csv_into_graph)
         ctrl.addWidget(btn_load_csv)
+        # Clear all plots/datasets
+        btn_clear_all = QtWidgets.QPushButton("Clear plots")
+        btn_clear_all.clicked.connect(self._clear_all_csvs)
+        ctrl.addWidget(btn_clear_all)
         
-        # CSV info display (filename and settings)
+        # CSV info display (list of loaded datasets with settings)
         self.csv_info_label = QtWidgets.QLabel("No CSV loaded")
         self.csv_info_label.setStyleSheet("color: #666; font-style: italic;")
         ctrl.addWidget(self.csv_info_label)
@@ -4358,6 +4440,13 @@ class MainWindow(QtWidgets.QMainWindow):
         ctrl.addWidget(self.cursor_curve2_combo)
         ctrl.addStretch(1)
         v.addLayout(ctrl)
+
+        # Area that lists info for all loaded CSVs
+        self.csv_infos_container = QtWidgets.QWidget()
+        self.csv_infos_layout = QtWidgets.QVBoxLayout(self.csv_infos_container)
+        self.csv_infos_layout.setContentsMargins(0, 0, 0, 0)
+        self.csv_infos_layout.setSpacing(2)
+        v.addWidget(self.csv_infos_container)
 
         # Combined channel selection and zoom controls (will be populated when CSV is loaded)
         channel_selection_container = QtWidgets.QWidget()
@@ -4700,26 +4789,91 @@ class MainWindow(QtWidgets.QMainWindow):
             # Parse settings from CSV
             settings_dict, monitor_extras = self._parse_csv_settings(path)
             
-            # Update CSV info display
-            self._update_csv_info_display(path, settings_dict, monitor_extras)
-            # Store for later (e.g., time scaling)
-            self.current_csv_settings = dict(settings_dict)
-            
-            self.available_channels = channel_cols
-            self.current_csv_path = path
-            # Clear cache when loading new file
-            if hasattr(self, 'two_plot') and self.two_plot:
-                self.two_plot._cached_csv_data = None
-                self.two_plot._cached_csv_path = None
-            
-            # Update MultiSelectCombo widgets with available channels
-            self.combo_csv_plot1.set_items(channel_cols)
-            self.combo_csv_plot2.set_items(channel_cols)
-            
-            # Show the channel selection container
-            self.channel_selection_container.setVisible(True)
-            
-            self._set_status(f"CSV loaded: {len(channel_cols)} channels available. Select channels to plot.")
+            # If no datasets loaded yet, initialize as primary; otherwise, treat as overlay
+            if int(getattr(self, "dataset_count", 0)) == 0:
+                # Update CSV info display (preview label)
+                self._update_csv_info_display(path, settings_dict, monitor_extras)
+                # Store for later (e.g., time scaling)
+                self.current_csv_settings = dict(settings_dict)
+                self.dataset_settings_by_id[1] = dict(settings_dict)
+                self.dataset_paths_by_id[1] = path
+                self.available_channels = channel_cols
+                self.current_csv_path = path
+                # Initialize/clear caches
+                if hasattr(self, 'two_plot') and self.two_plot:
+                    self.two_plot._cached_csv_data = None
+                    self.two_plot._cached_csv_path = None
+                    try:
+                        self.two_plot.clear_overlays()
+                    except Exception:
+                        pass
+                # Initialize dataset registry for primary CSV
+                import os as _os
+                self.dataset_count = 1
+                self.dataset_labels_by_id = {1: _os.path.basename(path)}
+                self.dataset_channels_by_id = {1: list(channel_cols)}
+                # Update selectors
+                prefixed = [f"1. {c}" for c in channel_cols]
+                self.combo_csv_plot1.set_items(prefixed)
+                self.combo_csv_plot2.set_items(prefixed)
+                # Show selection row
+                self.channel_selection_container.setVisible(True)
+                # Append info line for dataset 1
+                self._append_csv_info_line(1, path, settings_dict, monitor_extras)
+                # Minimize duplicate preview on the top label after loading
+                if hasattr(self, "csv_info_label"):
+                    self.csv_info_label.setText("Loaded CSVs:")
+                    self.csv_info_label.setStyleSheet("color: #666; font-style: italic;")
+                self._set_status(f"CSV loaded: {len(channel_cols)} channels available. Select channels to plot.")
+            else:
+                # Append as overlay dataset
+                import os as _os
+                ds_id = int(self.dataset_count) + 1
+                self.dataset_count = ds_id
+                self.dataset_labels_by_id[ds_id] = _os.path.basename(path)
+                self.dataset_channels_by_id[ds_id] = list(channel_cols)
+                self.dataset_paths_by_id[ds_id] = path
+                self.dataset_settings_by_id[ds_id] = dict(settings_dict)
+                # Append items to selectors with prefix
+                prefixed = [f"{ds_id}. {c}" for c in channel_cols]
+                self.combo_csv_plot1.append_items(prefixed)
+                self.combo_csv_plot2.append_items(prefixed)
+                # Auto-check new items that match dataset 1 selection names
+                def _parse_base_checked(items):
+                    out = []
+                    for t in items:
+                        s = str(t)
+                        if "." in s[:4]:
+                            try:
+                                num, name = s.split(".", 1)
+                                if int(num.strip()) == 1:
+                                    out.append(name.strip())
+                            except Exception:
+                                pass
+                        else:
+                            out.append(s.strip())
+                    return out
+                base_sel1 = _parse_base_checked(self.combo_csv_plot1.checked_items())
+                base_sel2 = _parse_base_checked(self.combo_csv_plot2.checked_items())
+                self.combo_csv_plot1.set_checked_by_texts([f"{ds_id}. {n}" for n in base_sel1], checked=True, preserve_others=True)
+                self.combo_csv_plot2.set_checked_by_texts([f"{ds_id}. {n}" for n in base_sel2], checked=True, preserve_others=True)
+                # Read columns for overlay plotting (only those checked for this dataset)
+                def _selected_for_dataset(combo, wanted_ds_id):
+                    out = []
+                    for t in combo.checked_items():
+                        s = str(t)
+                        if "." in s[:4]:
+                            try:
+                                num, name = s.split(".", 1)
+                                if int(num.strip()) == wanted_ds_id:
+                                    out.append(name.strip())
+                            except Exception:
+                                pass
+                    return out
+                # Append info line and refresh overlays (reads only selected cols)
+                self._append_csv_info_line(ds_id, path, settings_dict, monitor_extras)
+                self._refresh_overlays_from_selection()
+                self._set_status(f"CSV {ds_id} added.")
             
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "CSV", f"Failed to load CSV:\n{e}")
@@ -4860,7 +5014,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return settings_dict, monitor_extras
     
     def _update_csv_info_display(self, csv_path: str, settings_dict: dict, monitor_extras: dict | None = None):
-        """Update the CSV info label with filename and important settings."""
+        """Update the single-line preview label (top bar) for the currently selected CSV."""
         filename = os.path.basename(csv_path)
         
         # Extract important settings
@@ -4931,6 +5085,40 @@ class MainWindow(QtWidgets.QMainWindow):
             self.csv_info_label.setText(info_text)
             self.csv_info_label.setStyleSheet("")  # Use default/natural text color
 
+    def _append_csv_info_line(self, ds_id: int, csv_path: str, settings_dict: dict, monitor_extras: dict | None = None):
+        """Append a line describing a loaded CSV under the top bar."""
+        try:
+            filename = os.path.basename(csv_path)
+        except Exception:
+            filename = str(csv_path)
+        parts = [f"{ds_id}. {filename}"]
+        def _fmt4(v):
+            try:
+                s = str(v).strip()
+                if s == "" or s.lower() == "nan":
+                    return s
+                f = float(s)
+                if f != int(f):
+                    return f"{f:.4g}"
+                return str(int(f))
+            except Exception:
+                return str(v)
+        for key in ("motor_type","motor_connection","mode","sensored_control","Fs_trq","cc_trise","spdc_trise"):
+            val = settings_dict.get(key)
+            if val is not None:
+                parts.append(f"{key}={_fmt4(val)}")
+        if monitor_extras:
+            mv = monitor_extras.get("mode") or monitor_extras.get("Mode")
+            if mv is not None:
+                parts.append(f"mode={mv}")
+            vd = monitor_extras.get("Vdc") or monitor_extras.get("VDC")
+            if vd is not None:
+                parts.append(f"Vdc={_fmt4(vd)}")
+        text = " | ".join(str(p) for p in parts if p is not None and str(p) != "")
+        lbl = QtWidgets.QLabel(text)
+        self.csv_infos_layout.addWidget(lbl)
+        return lbl
+
     def _on_csv_channels_changed(self):
         """Called when channel selection changes in CSV plot combos."""
         if self.current_csv_path:
@@ -4940,6 +5128,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._populate_cursor_track_combos()
         except Exception:
             pass
+        # Refresh overlays for datasets >= 2 according to current selections
+        try:
+            self._refresh_overlays_from_selection()
+        except Exception:
+            pass
 
 
     def _plot_csv_path(self, path: str):
@@ -4947,14 +5140,48 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         
-        # Get selected channels from MultiSelectCombo widgets
-        channels1 = self.combo_csv_plot1.checked_items()
-        channels2 = self.combo_csv_plot2.checked_items()
+        # Get selected channels from MultiSelectCombo widgets (base dataset only)
+        raw1_all = self.combo_csv_plot1.checked_items()
+        raw2_all = self.combo_csv_plot2.checked_items()
+        def _extract_base(items):
+            out = []
+            for t in items:
+                s = str(t)
+                # accept "1. name" or plain "name"
+                if "." in s[:4]:
+                    try:
+                        num, name = s.split(".", 1)
+                        if int(num.strip()) == 1:
+                            out.append(name.strip())
+                    except Exception:
+                        pass
+                else:
+                    out.append(s.strip())
+            return out
+        channels1 = _extract_base(raw1_all)
+        channels2 = _extract_base(raw2_all)
         
         # Check if at least one channel is selected
         if not channels1 and not channels2:
-            self._set_status("Please select at least one channel to plot.")
-            return
+            # If nothing selected, clear all base curves and overlays
+            try:
+                if hasattr(self, "two_plot") and self.two_plot:
+                    try:
+                        self.two_plot.clear_overlays()
+                    except Exception:
+                        pass
+                    try:
+                        self.two_plot.clear()
+                    except Exception:
+                        pass
+                # Also refresh cursor combos to empty
+                try:
+                    self._populate_cursor_track_combos()
+                except Exception:
+                    pass
+            finally:
+                self._set_status("Cleared plots (no channels selected).")
+                return
         
         # Convert selected channels to groups format (each channel is its own group)
         # This allows multiple channels to be plotted together
@@ -5070,23 +5297,283 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "FFT", f"Failed to compute FFT for Plot2:\n{e}")
 
+    def _add_csv_overlay(self):
+        """Pick a CSV and overlay selected channels from current combos onto plots."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Add CSV (overlay)", DATA_DIR, "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            import pandas as pd
+            import os
+            # Base selections (dataset 1) used to auto-select same names in the new dataset
+            def _parse_base_checked(items):
+                out = []
+                for t in items:
+                    t = str(t)
+                    if "." in t[:4]:
+                        try:
+                            num, name = t.split(".", 1)
+                            if int(num.strip()) == 1:
+                                out.append(name.strip())
+                        except Exception:
+                            pass
+                    else:
+                        out.append(t.strip())
+                return out
+            base_sel1 = _parse_base_checked(self.combo_csv_plot1.checked_items())
+            base_sel2 = _parse_base_checked(self.combo_csv_plot2.checked_items())
+            # Read header to determine what exists
+            try:
+                header_df = pd.read_csv(path, nrows=0, engine="c", on_bad_lines="skip")
+            except Exception:
+                header_df = pd.read_csv(path, nrows=0, engine="python", on_bad_lines="skip")
+            overlay_cols = [c for c in header_df.columns if c and not str(c).startswith("#") and not str(c).startswith("Unnamed") and not str(c).startswith("_duplicated_")]
+            # Downsample factor from UI
+            downsample_factor = self.csv_downsample_combo.currentData()
+            if not downsample_factor or downsample_factor <= 0:
+                downsample_factor = 1
+            # Compute sec_per_sample for this CSV
+            settings, _extras = self._parse_csv_settings(path)
+            def _safe_float(v):
+                try:
+                    s = str(v).strip()
+                    if s == "" or s.lower() == "nan":
+                        return None
+                    return float(s)
+                except Exception:
+                    return None
+            ts_div = _safe_float(settings.get("data_logger_ts_div"))
+            fs_trq = _safe_float(settings.get("Fs_trq"))
+            if ts_div and ts_div > 0 and fs_trq and fs_trq > 0:
+                sec_per_sample = ts_div / (fs_trq * 1000.0)
+            else:
+                # Fallback to current graph time scale (may be 1.0 = samples)
+                sec_per_sample = float(getattr(self.two_plot, "_sec_per_sample", 1.0))
+            # Register dataset and update selectors with prefixed names
+            self.dataset_count = int(self.dataset_count) + 1
+            ds_id = self.dataset_count
+            self.dataset_labels_by_id[ds_id] = os.path.basename(path)
+            self.dataset_channels_by_id[ds_id] = list(overlay_cols)
+            prefixed_items = [f"{ds_id}. {c}" for c in overlay_cols]
+            self.combo_csv_plot1.append_items(prefixed_items)
+            self.combo_csv_plot2.append_items(prefixed_items)
+            # Auto-check new dataset items matching current base selections
+            self.combo_csv_plot1.set_checked_by_texts([f"{ds_id}. {n}" for n in base_sel1], checked=True, preserve_others=True)
+            self.combo_csv_plot2.set_checked_by_texts([f"{ds_id}. {n}" for n in base_sel2], checked=True, preserve_others=True)
+            # Determine requested columns for THIS dataset id
+            def _selected_for_dataset(combo, wanted_ds_id):
+                out = []
+                for t in combo.checked_items():
+                    t = str(t)
+                    if "." in t[:4]:
+                        try:
+                            num, name = t.split(".", 1)
+                            if int(num.strip()) == wanted_ds_id:
+                                out.append(name.strip())
+                        except Exception:
+                            pass
+                return out
+            sel1_ds = _selected_for_dataset(self.combo_csv_plot1, ds_id)
+            sel2_ds = _selected_for_dataset(self.combo_csv_plot2, ds_id)
+            requested_cols = list(set(sel1_ds + sel2_ds))
+            if not requested_cols:
+                requested_cols = list(set(base_sel1 + base_sel2) & set(overlay_cols))
+            if not requested_cols:
+                QtWidgets.QMessageBox.information(self, "Overlay", "No channels selected for this CSV.")
+                return
+            # Read required data columns
+            try:
+                df = pd.read_csv(path, usecols=requested_cols, engine="c", on_bad_lines="skip")
+            except Exception:
+                df = pd.read_csv(path, usecols=requested_cols, engine="python", on_bad_lines="skip")
+            # Downsample
+            if downsample_factor > 1:
+                df = df.iloc[::downsample_factor].copy()
+            # Convert to numeric
+            for c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce", downcast='float')
+            df = df.dropna(how="all")
+            n = len(df.index)
+            if n < 2:
+                QtWidgets.QMessageBox.information(self, "Overlay", "CSV has too few samples.")
+                return
+            stride = float(downsample_factor) * float(sec_per_sample)
+            x = np.arange(n, dtype=np.float64) * stride
+            # Build mapping per plot based on which channels were selected
+            win1_data = {}
+            win2_data = {}
+            for c in df.columns:
+                y = df[c].values.astype(np.float32, copy=False)
+                if c in sel1_ds or (not sel1_ds and c in base_sel1):
+                    win1_data[c] = (x, y)
+                if c in sel2_ds or (not sel2_ds and c in base_sel2):
+                    win2_data[c] = (x, y)
+            label = f"{ds_id}: {os.path.basename(path)}"
+            self.two_plot.add_overlay_curves(win1_data, win2_data, label)
+            self._set_status(f"Overlay added: {label}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Overlay", f"Failed to add overlay:\n{e}")
+
+    def _clear_all_csvs(self):
+        """Clear all datasets, UI selections, overlays, and plots."""
+        try:
+            self.dataset_count = 0
+            self.dataset_channels_by_id = {}
+            self.dataset_labels_by_id = {}
+            self.dataset_paths_by_id = {}
+            self.dataset_settings_by_id = {}
+            self.current_csv_path = None
+            self.available_channels = []
+            # Clear plot widgets
+            if hasattr(self, "two_plot") and self.two_plot:
+                try:
+                    self.two_plot.clear_overlays()
+                except Exception:
+                    pass
+                try:
+                    self.two_plot.clear()
+                except Exception:
+                    pass
+            # Clear selectors
+            if hasattr(self, "combo_csv_plot1"):
+                self.combo_csv_plot1.set_items([])
+            if hasattr(self, "combo_csv_plot2"):
+                self.combo_csv_plot2.set_items([])
+            # Hide channel selection row until a CSV is loaded
+            if hasattr(self, "channel_selection_container"):
+                self.channel_selection_container.setVisible(False)
+            # Reset info labels
+            if hasattr(self, "csv_infos_layout"):
+                while self.csv_infos_layout.count():
+                    item = self.csv_infos_layout.takeAt(0)
+                    w = item.widget()
+                    if w is not None:
+                        w.deleteLater()
+            if hasattr(self, "csv_info_label"):
+                self.csv_info_label.setText("No CSV loaded")
+                self.csv_info_label.setStyleSheet("color: #666; font-style: italic;")
+            self._set_status("Cleared plots and datasets.")
+        except Exception:
+            pass
+
+    def _refresh_overlays_from_selection(self):
+        """Rebuild overlay curves for all datasets >= 2 based on current selections."""
+        if not hasattr(self, "two_plot") or not self.two_plot:
+            return
+        # Remove existing overlay items
+        try:
+            self.two_plot.clear_overlays()
+        except Exception:
+            pass
+        # Helper parse
+        def _selected_for_dataset(combo, wanted_ds_id):
+            out = []
+            for t in combo.checked_items():
+                s = str(t)
+                if "." in s[:4]:
+                    try:
+                        num, name = s.split(".", 1)
+                        if int(num.strip()) == wanted_ds_id:
+                            out.append(name.strip())
+                    except Exception:
+                        pass
+            return out
+        # Base selection (used as fallback if no explicit selection for an overlay dataset)
+        def _parse_base_checked(items):
+            out = []
+            for t in items:
+                s = str(t)
+                if "." in s[:4]:
+                    try:
+                        num, name = s.split(".", 1)
+                        if int(num.strip()) == 1:
+                            out.append(name.strip())
+                    except Exception:
+                        pass
+                else:
+                    out.append(s.strip())
+            return out
+        base_sel1 = _parse_base_checked(self.combo_csv_plot1.checked_items())
+        base_sel2 = _parse_base_checked(self.combo_csv_plot2.checked_items())
+        # Downsample factor from UI
+        try:
+            downsample_factor = self.csv_downsample_combo.currentData()
+        except Exception:
+            downsample_factor = 1
+        if not downsample_factor or downsample_factor <= 0:
+            downsample_factor = 1
+        # Iterate overlay datasets
+        for ds_id in sorted(self.dataset_paths_by_id.keys()):
+            if int(ds_id) <= 1:
+                continue
+            path = self.dataset_paths_by_id.get(ds_id)
+            if not path:
+                continue
+            settings = self.dataset_settings_by_id.get(ds_id, {})
+            # Selected columns for this dataset
+            sel1 = _selected_for_dataset(self.combo_csv_plot1, ds_id)
+            sel2 = _selected_for_dataset(self.combo_csv_plot2, ds_id)
+            requested = list(set(sel1 + sel2))
+            if not requested:
+                continue
+            # Compute sec_per_sample
+            def _safe_float(v):
+                try:
+                    s = str(v).strip()
+                    if s == "" or s.lower() == "nan":
+                        return None
+                    return float(s)
+                except Exception:
+                    return None
+            tsf = _safe_float(settings.get("data_logger_ts_div"))
+            fsf = _safe_float(settings.get("Fs_trq"))
+            if tsf and tsf > 0 and fsf and fsf > 0:
+                sec_per_sample = tsf / (fsf * 1000.0)
+            else:
+                sec_per_sample = float(getattr(self.two_plot, "_sec_per_sample", 1.0))
+            # Load only requested columns
+            import pandas as pd
+            try:
+                df = pd.read_csv(path, usecols=requested, engine="c", on_bad_lines="skip")
+            except Exception:
+                df = pd.read_csv(path, usecols=requested, engine="python", on_bad_lines="skip")
+            if downsample_factor > 1:
+                df = df.iloc[::downsample_factor].copy()
+            for c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce", downcast='float')
+            df = df.dropna(how="all")
+            n = len(df.index)
+            if n < 2:
+                continue
+            stride = float(downsample_factor) * float(sec_per_sample)
+            x = np.arange(n, dtype=np.float64) * stride
+            win1_data = {}
+            win2_data = {}
+            for c in df.columns:
+                y = df[c].values.astype(np.float32, copy=False)
+                if c in sel1:
+                    win1_data[c] = (x, y)
+                if c in sel2:
+                    win2_data[c] = (x, y)
+            label = f"{ds_id}: {self.dataset_labels_by_id.get(ds_id, '')}"
+            self.two_plot.add_overlay_curves(win1_data, win2_data, label)
+
     def _do_fft_for_plot(self, win_id: int):
-        # Gather all currently displayed curves for this plot window
+        # Gather all currently displayed curves for this plot window (base + overlays)
         shown = []
         try:
-            for (wid, name), curve in list(self.two_plot._curves.items()):
-                if wid != win_id:
-                    continue
+            plotw = self.two_plot.plot1 if win_id == 1 else self.two_plot.plot2
+            for item in plotw.listDataItems():
                 try:
-                    x = curve.xData
-                    y = curve.yData
+                    x = item.xData; y = item.yData
+                    nm = item.name() or "curve"
                 except Exception:
-                    x = None; y = None
-                if x is None or y is None:
+                    x = None; y = None; nm = None
+                if x is None or y is None or nm is None:
                     continue
                 if len(x) < 2 or len(y) < 2:
                     continue
-                shown.append((name, np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)))
+                shown.append((str(nm), np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)))
         except Exception:
             shown = []
         if not shown:
