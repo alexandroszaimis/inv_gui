@@ -1,2 +1,4 @@
 # ignore data logs
 data/
+# ignore compiled app
+compiled/

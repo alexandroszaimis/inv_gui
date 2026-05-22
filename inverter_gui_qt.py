@@ -67,6 +67,26 @@ LOG_PAYLOAD_SIZE  = 2 * LOG_PAYLOAD_U16
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
+UI_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_settings.json")
+
+def _load_ui_settings() -> dict:
+    try:
+        if os.path.isfile(UI_SETTINGS_FILE):
+            with open(UI_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def _save_ui_settings(data: dict):
+    try:
+        existing = _load_ui_settings()
+        existing.update(data)
+        with open(UI_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(existing, f, indent=2)
+    except Exception:
+        pass
+
 # ----------------------- CRC16-CCITT -----------------------
 def crc16_ccitt(data: bytes, poly=0x1021, init=0xFFFF) -> int:
     crc = init
@@ -131,6 +151,10 @@ FIELDS = [
 
     ("ocd_thres","f32","A_peak"), ("overvoltage_thres","f32","V"), ("undervoltage_thres","f32","V"),
 
+    ("encoder_max_value", "u32","—"), ("use_single_encoder_offset", "u8", "0 or 1"), ("encoder_sample_div", "u8", "1 to 255"),
+    ("resolver_resolution", "u8","No of bits"), ("resolver_exc_freq", "u8", "2-20KHz"), ("resolver_np", "u8", "1 to 255"),
+
+    ("use_pll", "u8", "mask: msb ω, lsb θ"), ("f_pll_lo", "f32", "min pll gain"), ("f_pll_hi", "f32", "max pll gain"), ("pll_iq_lo", "f32", "iq for f_pll_min"),
     ("ma1max","f32","—"), ("ma3","f32","—"),
 
     ("mcu_max_temp","f32","°C"),
@@ -188,7 +212,7 @@ ENUM_SENSOR     = {0: "none", 1: "resolver", 2: "abs_encoder", 3: "inc_encoder"}
 ENUM_CONN       = {0: "DELTA", 1: "STAR"}
 ENUM_ZERO_SEQ   = {0: "NONE", 1: "3RD_HARMONIC_INJ", 2: "MIN_MAX_INJ"}
 ENUM_SAMPLING   = {0: "SYNC", 1: "ASYNC"}
-ENUM_MODE       = {0: "FOC", 1: "V_F", 2: "DTC_LUT", 3: "DTC_SVM"}
+ENUM_MODE       = {0: "FOC", 1: "V_F", 2: "RESOLVER_CALIBRATION", 3: "DTC_LUT", 4: "DTC_SVM"}
 
 ENUM_MAP_BY_NAME = {
     "motor_type":       ENUM_MOTOR_TYPE,
@@ -225,9 +249,23 @@ LOG_TABLE_VARIABLES = [
     ("I1", "f32"), 
     ("I2", "f32"), 
     ("I3", "f32"), 
+    ("V1_inj", "f32"), 
+    ("V2_inj", "f32"),
+    ("V3_inj", "f32"),
     ("V1", "f32"), 
     ("V2", "f32"),
-    ("V3", "f32"),         
+    ("V3", "f32"),
+    ("Vd_nonsat","f32"),
+    ("Vq_nonsat","f32"),
+    ("Vd_sat","f32"),
+    ("Vq_sat","f32"),
+    ("dec_d", "f32"),
+    ("dec_q", "f32"),
+    ("Ld", "f32"),
+    ("Lq", "f32"),
+    ("psi", "f32"),
+    ("Ed", "f32"),
+    ("Eq", "f32"),
     ("pwr_ref", "f32"),       
     ("pwr_actual", "f32"), 
     ("velocity_request", "i16"),   
@@ -239,8 +277,19 @@ LOG_TABLE_VARIABLES = [
     ("TIM1_CCR3", "u16"),
     ("dtc_sw_table1", "u16"),
     ("dtc_sw_table2", "u16"),
-    ("dtc_sw_table3", "u16")
-   
+    ("dtc_sw_table3", "u16"),
+    ("dtc_fsw_actual1", "u16"),
+    ("dtc_fsw_actual2", "u16"),
+    ("dtc_fsw_actual3", "u16"),
+    ("dtc_fsw_actual_total", "u16"),
+    ("theta_enc", "f32"),
+    ("dtc_psi_angle", "f32"),
+    ("phi_e", "f32"),
+    ("pll_theta", "f32"),
+    ("pll_omega", "f32"),
+    ("adc_vref", "f32"),
+    ("offset_buf", "i16"),
+    ("offset_buf_idx", "u16"),
 ]
 
 # DIAG fields (name, type). Keep aligned with firmware order.
@@ -327,13 +376,13 @@ ERRORS_MAP = {
     0:"INVERTER_OK",1:"OCD_FAULT",2:"INVERTED_PHASE_POLARITY",3:"HW_FAULT",
     4:"OVERVOLTAGE",5:"UNDERVOLTAGE",6:"IGBT_OVERTEMP",7:"MOTOR_OVERTEMP",
     8:"ADC_ERROR",9:"ADC_INIT_ERROR",10:"SPI_ERROR",11:"ENCODER_READ_ERROR",
-    12:"ENDAT_INIT_ERROR",13:"VELOCITY_EXCEEDS_MAXIMUM",14:"PWM_OVERMODULATION",
-    15:"INVERSE_TRANSFORM_TIMEOUT",16:"TIMER_INIT_ERROR",17:"PWM_START_FAILURE",
-    18:"PWM_STOP_FAILURE",19:"INVALID_CONTROL_MODE",20:"CONFIGURATION_ERROR",
-    21:"WHILE1_TIMEOUT",22:"CANRX_ERROR",23:"CANTX_ERROR",24:"COMMUNICATION_TIMEOUT_ERROR",
-    25:"SUPPLY_3V3_ERROR",26:"SUPPLY_5V0_ERROR",27:"SUPPLY_5V6_ERROR",
-    28:"SUPPLY_12V0_ERROR",29:"VREF_ERROR",30:"NO_LV_SUPPLY",31:"MCU_OVERTEMP",
-    32:"MCU_DISABLE_IMPLAUSIBILITY",33:"MCU_ENABLE_IMPLAUSIBILITY",34:"GD_DISABLE_IMPLAUSIBILITY",
+    12:"ENDAT_INIT_ERROR",13:"RESOLVER_READ_ERROR",14:"AD2S_INIT_ERROR",15:"VELOCITY_EXCEEDS_MAXIMUM",
+    16:"PWM_OVERMODULATION",17:"INVERSE_TRANSFORM_TIMEOUT",18:"TIMER_INIT_ERROR",19:"PWM_START_FAILURE",
+    20:"PWM_STOP_FAILURE",21:"INVALID_CONTROL_MODE",22:"CONFIGURATION_ERROR",
+    23:"WHILE1_TIMEOUT",24:"CANRX_ERROR",25:"CANTX_ERROR",26:"COMMUNICATION_TIMEOUT_ERROR",
+    27:"SUPPLY_3V3_ERROR",28:"SUPPLY_5V0_ERROR",29:"SUPPLY_5V6_ERROR",
+    30:"SUPPLY_12V0_ERROR",31:"VREF_ERROR",32:"NO_LV_SUPPLY",33:"MCU_OVERTEMP",
+    34:"MCU_DISABLE_IMPLAUSIBILITY",35:"MCU_ENABLE_IMPLAUSIBILITY",36:"GD_DISABLE_IMPLAUSIBILITY",
 }
 ERRORTYPE_MAP = {0:"NO_ERRORS",1:"FATAL_ERROR",2:"CRITICAL_ERROR",3:"WARNING",4:"INITIALIZING"}
 LATCHED_MAP    = {0:"ERROR_RESET",1:"FATAL_ERROR_EXISTING",2:"CRITICAL_ERROR_EXISTING",3:"WARNING_EXISTING"}
@@ -542,8 +591,19 @@ class DataLoggerQt:
 
     # ---------- lifecycle ----------
     def start(self, basename: str):
-        self.bin_path = os.path.join(self.DATA_DIR, basename + ".bin")
-        self.csv_path = os.path.join(self.DATA_DIR, basename + ".csv")
+        # Create per-date folder (e.g., 24_11_2025) under DATA_DIR
+        try:
+            date_folder = datetime.now().strftime("%d_%m_%Y")
+        except Exception:
+            date_folder = "unknown_date"
+        target_dir = os.path.join(self.DATA_DIR, date_folder)
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except Exception:
+            # Fallback to DATA_DIR if making date folder fails
+            target_dir = self.DATA_DIR
+        self.bin_path = os.path.join(target_dir, basename + ".bin")
+        self.csv_path = os.path.join(target_dir, basename + ".csv")
         self._bin = open(self.bin_path, "wb", buffering=1024*1024)
 
     def write_payload(self, payload: bytes):
@@ -897,6 +957,14 @@ class MultiSelectCombo(QtWidgets.QComboBox):
             self._model.appendRow(it)
         self._refresh_text()
 
+    def remove_items_by_prefix(self, prefix: str):
+        """Remove all items whose text starts with prefix."""
+        rows = [i for i in range(self._model.rowCount())
+                if self._model.item(i).text().startswith(prefix)]
+        for i in reversed(rows):
+            self._model.removeRow(i)
+        self._refresh_text()
+
     def set_checked_by_texts(self, texts, checked=True, preserve_others=True):
         """Set check-state for items whose text is in texts."""
         want = set(texts or [])
@@ -1229,6 +1297,8 @@ class CSVLoaderThread(QtCore.QThread):
 class TwoWindowPlot(QtWidgets.QWidget):
     # Emit x1, y1, x2, y2, dx, dy whenever either cursor moves
     cursorMoved = QtCore.Signal(float, float, float, float, float, float)
+    # Emit when set of curves changes (add/remove/replot) so UI can refresh dropdowns
+    curvesUpdated = QtCore.Signal()
     def __init__(self, parent=None):
         super().__init__(parent)
         self._sec_per_sample = 1.0  # Default: x-axis in samples
@@ -1286,6 +1356,12 @@ class TwoWindowPlot(QtWidgets.QWidget):
 
         # state
         self._curves = {}            # keys: (win_id, name) -> PlotDataItem
+        self._fft_enabled    = {1: False, 2: False}
+        self._fft_use_vis    = {1: False, 2: False}
+        self._fft_log        = {1: False, 2: False}
+        self._fft_curves     = {}    # keys: (win_id, name) -> PlotDataItem
+        self._fft_saved_data = {}    # win_id -> {name: (x_arr, y_arr)}
+        self._fft_time_range = {}    # win_id -> (xmin, xmax) in time-domain units
         # Vibrant color palette (no grey/dull tones)
         self._palette = [
             "#e41a1c",  # red
@@ -1419,6 +1495,9 @@ class TwoWindowPlot(QtWidgets.QWidget):
             win2_titles=["Ia/Ib","CH10-12"],
             link_x=True
         )
+        # Default: pan with left-click when no zoom mode is active
+        for pw in (self.plot1, self.plot2):
+            pw.getViewBox().setMouseMode(pg.ViewBox.PanMode)
 
     # ---------- public API ----------
     def set_cursors_enabled(self, enabled: bool):
@@ -1443,6 +1522,169 @@ class TwoWindowPlot(QtWidgets.QWidget):
             self._sec_per_sample = float(sec_per_sample) if sec_per_sample and sec_per_sample > 0 else 1.0
         except Exception:
             self._sec_per_sample = 1.0
+
+    # -------- FFT inline mode --------
+    def _fft_any_active(self):
+        return any(self._fft_enabled.values())
+
+    def _update_xlink(self):
+        """Unlink plot2 X-axis whenever any FFT is active; restore when all off."""
+        if self._fft_any_active():
+            self.plot2.setXLink(None)
+        elif self._current_link_x:
+            self.plot2.setXLink(self.plot1)
+
+    @staticmethod
+    def _vb_clear_limits(vb):
+        """Remove all ViewBox hard limits (needed before setting FFT range)."""
+        try:
+            vb.setLimits(xMin=None, xMax=None, yMin=None, yMax=None,
+                         minXRange=None, maxXRange=None,
+                         minYRange=None, maxYRange=None)
+        except Exception:
+            pass
+
+    def set_fft_mode(self, win_id: int, enabled: bool,
+                     use_visible: bool = False, log_scale: bool = False):
+        self._fft_enabled[win_id]  = bool(enabled)
+        self._fft_use_vis[win_id]  = bool(use_visible)
+        self._fft_log[win_id]      = bool(log_scale)
+        self._update_xlink()
+        plotw = self.plot1 if win_id == 1 else self.plot2
+        if not enabled:
+            self._clear_fft_curves(win_id)
+            # Restore saved time-domain data into each curve
+            saved = self._fft_saved_data.get(win_id, {})
+            for (wid, name), c in self._curves.items():
+                if wid != win_id:
+                    continue
+                xy = saved.get(name)
+                if xy is not None:
+                    try:
+                        c.setData(xy[0], xy[1])
+                    except Exception:
+                        pass
+            self._fft_saved_data.pop(win_id, None)
+            self._fft_time_range.pop(win_id, None)
+            plotw.setLabel('bottom', 'Time (s)')
+            plotw.setLabel('left', '')
+            vb = plotw.getViewBox()
+            def _restore_range(vb=vb):
+                try:
+                    vb.enableAutoRange(axis=pg.ViewBox.XYAxes)
+                    vb.autoRange()
+                except Exception:
+                    pass
+            _restore_range()
+            QtCore.QTimer.singleShot(0, _restore_range)
+        else:
+            self._rebuild_fft(win_id)
+
+    def _clear_fft_curves(self, win_id: int):
+        plotw = self.plot1 if win_id == 1 else self.plot2
+        to_del = [k for k in self._fft_curves if k[0] == win_id]
+        for k in to_del:
+            try:
+                plotw.removeItem(self._fft_curves[k])
+            except Exception:
+                pass
+            del self._fft_curves[k]
+
+    def _rebuild_fft(self, win_id: int):
+        import numpy as np
+        plotw = self.plot1 if win_id == 1 else self.plot2
+        # Remove stale FFT curves first
+        self._clear_fft_curves(win_id)
+        # If we already have saved data (FFT was active, e.g. options changed),
+        # reuse it; otherwise save from the live curves and blank them.
+        if win_id in self._fft_saved_data:
+            saved = self._fft_saved_data[win_id]
+            shown = [(name, np.asarray(xy[0], dtype=np.float64),
+                      np.asarray(xy[1], dtype=np.float64))
+                     for name, xy in saved.items() if xy[0] is not None and len(xy[0]) >= 4]
+        else:
+            # Save the current time-domain visible range BEFORE blanking curves
+            try:
+                xr = plotw.getViewBox().viewRange()[0]
+                self._fft_time_range[win_id] = (float(xr[0]), float(xr[1]))
+            except Exception:
+                self._fft_time_range[win_id] = None
+            saved = {}
+            shown = []
+            for (wid, name), c in self._curves.items():
+                if wid != win_id:
+                    continue
+                try:
+                    x = c.xData; y = c.yData
+                except Exception:
+                    x = y = None
+                if x is not None and y is not None and len(x) >= 4:
+                    saved[name] = (x.copy(), y.copy())
+                    shown.append((name,
+                                  np.asarray(x, dtype=np.float64),
+                                  np.asarray(y, dtype=np.float64)))
+                try:
+                    c.setData([], [])
+                except Exception:
+                    pass
+            self._fft_saved_data[win_id] = saved
+        if not shown:
+            return
+        # Determine x-range for visible-window mode using the SAVED time-domain range
+        # (viewRange() in FFT mode returns Hz, not seconds)
+        if self._fft_use_vis[win_id]:
+            tr = self._fft_time_range.get(win_id)
+            xmin, xmax = (tr[0], tr[1]) if tr is not None else (None, None)
+        else:
+            xmin, xmax = None, None
+        # Compute FFT per curve
+        min_len = 10**9
+        cleaned = []
+        for name, x, y in shown:
+            mask = np.isfinite(x) & np.isfinite(y)
+            if xmin is not None:
+                mask &= (x >= xmin) & (x <= xmax)
+            xs = x[mask]; ys = y[mask]
+            if ys.size < 4:
+                continue
+            min_len = min(min_len, int(ys.size))
+            cleaned.append((name, xs, ys))
+        if not cleaned or min_len < 4:
+            return
+        n = int(min_len)
+        window = np.hanning(n)
+        # Fs from x-axis spacing of first curve (rfftfreq gives 0..fs/2 by construction)
+        x0 = cleaned[0][1]
+        dx = np.diff(x0)
+        dt = float(np.median(dx[np.isfinite(dx)])) if dx.size else 1.0
+        fs = 1.0 / dt if dt > 0 else 1.0
+        freqs = np.fft.rfftfreq(n, d=1.0 / fs)   # max = fs/2 (Nyquist)
+        all_mags = []
+        for name, _, ys in cleaned:
+            yy = ys[:n] - np.nanmean(ys[:n])
+            yy *= window
+            spec = np.fft.rfft(yy)
+            cg = float(np.sum(window)) / n
+            if not np.isfinite(cg) or cg <= 0:
+                cg = 1.0
+            mag = (2.0 / (n * cg)) * np.abs(spec)
+            if self._fft_log[win_id]:
+                mag = 20.0 * np.log10(np.maximum(mag, 1e-15))
+            all_mags.append(mag)
+            pen = self._pen_for(name)
+            c = plotw.plot(freqs, mag, name=name, pen=pen)
+            self._fft_curves[(win_id, name)] = c
+        plotw.setLabel('bottom', 'Frequency (Hz)')
+        plotw.setLabel('left', 'Magnitude (dB)' if self._fft_log[win_id] else 'Amplitude')
+        f_max = float(freqs[-1]) if freqs.size else 1.0
+        y_min = float(min(m.min() for m in all_mags)) if all_mags else 0.0
+        y_max = float(max(m.max() for m in all_mags)) if all_mags else 1.0
+        vb = plotw.getViewBox()
+        # Clear hard limits imposed by the time-domain CSV load, then set FFT range
+        self._vb_clear_limits(vb)
+        vb.disableAutoRange()
+        vb.setXRange(0.0, f_max, padding=0.02)
+        vb.setYRange(y_min, y_max, padding=0.1)
 
     def set_cursors2_enabled(self, enabled: bool):
         self._cursors2_enabled = bool(enabled)
@@ -1580,11 +1822,12 @@ class TwoWindowPlot(QtWidgets.QWidget):
         elif isinstance(win2_titles, str):
             self.plot2.setTitle(win2_titles)
 
-        # X-linking
+        # X-linking — FFT overrides the link if active
         if link_x:
             self.plot2.setXLink(self.plot1)
         else:
             self.plot2.setXLink(None)
+        self._update_xlink()
 
     def set_zoom_mode(self, mode: str):
         vb1 = self.plot1.getViewBox()
@@ -1618,10 +1861,12 @@ class TwoWindowPlot(QtWidgets.QWidget):
                 vb.setMouseEnabled(x=False, y=True)
         else:
             for vb in (vb1, vb2):
-                vb.enableAutoRange(axis=pg.ViewBox.XYAxes)
-                vb.autoRange()
-                # Re-enable both axes for normal zoom
+                xr, yr = vb.viewRange()
+                vb.disableAutoRange()
+                vb.setXRange(xr[0], xr[1], padding=0)
+                vb.setYRange(yr[0], yr[1], padding=0)
                 vb.setMouseEnabled(x=True, y=True)
+                vb.setMouseMode(pg.ViewBox.PanMode)
 
     def zoom_fit(self):
         """Reset both plots to show all data (not cumulative unzoom)."""
@@ -1669,20 +1914,114 @@ class TwoWindowPlot(QtWidgets.QWidget):
             # 3) re-enable autorange for next user zooms
             vb.enableAutoRange(axis=pg.ViewBox.XYAxes)
 
+    def refit_limits_to_all_data(self):
+        """Recompute x/y limits and view ranges from ALL items (base + overlays)."""
+        try:
+            for plot in (self.plot1, self.plot2):
+                vb = plot.getViewBox()
+                # Gather bounds from every displayed data item
+                xmins, xmaxs, ymins, ymaxs = [], [], [], []
+                for item in plot.listDataItems():
+                    try:
+                        x = item.xData; y = item.yData
+                    except Exception:
+                        x = None; y = None
+                    if x is None or y is None or len(x) == 0 or len(y) == 0:
+                        continue
+                    # Use nan-aware min/max
+                    xmins.append(np.nanmin(x)); xmaxs.append(np.nanmax(x))
+                    ymins.append(np.nanmin(y)); ymaxs.append(np.nanmax(y))
+                if not xmins:
+                    continue
+                xmin = float(min(xmins)); xmax = float(max(xmaxs))
+                ymin = float(min(ymins)); ymax = float(max(ymaxs))
+                # Ensure Y includes 0 for context
+                if ymin > 0.0:
+                    ymin = 0.0
+                if ymax < 0.0:
+                    ymax = 0.0
+                # Avoid zero-width ranges
+                if xmax == xmin:
+                    xmax = xmin + 1.0
+                if ymax == ymin:
+                    if ymax >= 0.0:
+                        ymin = 0.0
+                        ymax = 1.0 if ymax == 0.0 else ymax
+                    else:
+                        ymin = ymax
+                        ymax = 0.0
+                # Update limits so user can pan/zoom over full new extent
+                try:
+                    # Choose reasonable min ranges
+                    min_x_range = max(1e-9, (xmax - xmin) * 1e-9)
+                    y_span = max(1e-6, (ymax - ymin))
+                    min_y_range = max(1e-6, y_span * 1e-6)
+                    vb.setLimits(
+                        xMin=xmin, xMax=xmax,
+                        yMin=ymin, yMax=ymax,
+                        minXRange=min_x_range,
+                        minYRange=min_y_range
+                    )
+                except Exception:
+                    pass
+                # Show full extent now
+                vb.disableAutoRange()
+                vb.setRange(xRange=(xmin, xmax), yRange=(ymin, ymax), padding=0.05)
+                vb.enableAutoRange(axis=pg.ViewBox.XYAxes)
+        except Exception:
+            pass
+
     def clear(self):
-        # Remove curves but keep widgets
+        # Clear FFT curves and reset FFT mode before removing regular curves
+        for win_id in (1, 2):
+            if self._fft_enabled.get(win_id):
+                plotw = self.plot1 if win_id == 1 else self.plot2
+                plotw.setLabel('bottom', 'Time (s)')
+                plotw.setLabel('left', '')
+            self._clear_fft_curves(win_id)
+            self._fft_enabled[win_id] = False
+            self._fft_saved_data.pop(win_id, None)
+            self._fft_time_range.pop(win_id, None)
+        # Remove only data curves and overlays; preserve decorations (cursors, zero lines, legends)
         for curve in list(self._curves.values()):
             try:
                 curve.getViewBox().removeItem(curve)
             except Exception:
                 pass
         self._curves.clear()
-        self.plot1.clear(); 
-        if self.plot1.plotItem.legend is None: self.plot1.addLegend()
-        self.plot1.showGrid(x=True, y=True)
-        self.plot2.clear();
-        if self.plot2.plotItem.legend is None: self.plot2.addLegend()
-        self.plot2.showGrid(x=True, y=True)
+        # Clear overlays explicitly
+        try:
+            self.clear_overlays()
+        except Exception:
+            pass
+        # Ensure legends/grids remain visible
+        try:
+            if self.plot1.plotItem.legend is None:
+                self.plot1.addLegend()
+            else:
+                try:
+                    self.plot1.plotItem.legend.clear()
+                except Exception:
+                    pass
+            self.plot1.showGrid(x=True, y=True)
+        except Exception:
+            pass
+        try:
+            if self.plot2.plotItem.legend is None:
+                self.plot2.addLegend()
+            else:
+                try:
+                    self.plot2.plotItem.legend.clear()
+                except Exception:
+                    pass
+            self.plot2.showGrid(x=True, y=True)
+        except Exception:
+            pass
+        # Notify UI that curves were cleared
+        try:
+            self.curvesUpdated.emit()
+        except Exception:
+            pass
 
     def _get_visible_x_range(self, link_x=True):
         """Get the visible x-axis range from the plots (for selective high-res loading)."""
@@ -1724,6 +2063,24 @@ class TwoWindowPlot(QtWidgets.QWidget):
         except Exception:
             y3 = y4 = 0.0
         return y3, y4
+
+    def set_tracking_y(self, y1=None, y2=None, p2_y1=None, p2_y2=None):
+        """Move H cursors to tracked curve Y values without triggering re-emission."""
+        pairs = [
+            (self._cursor1_h, y1),
+            (self._cursor2_h, y2),
+            (self._p2_cursor1_h, p2_y1),
+            (self._p2_cursor2_h, p2_y2),
+        ]
+        for ln, v in pairs:
+            if v is None:
+                continue
+            try:
+                ln.blockSignals(True)
+                ln.setPos(float(v))
+                ln.blockSignals(False)
+            except Exception:
+                pass
     
     def plot_csv(self, csv_path: str, groups1, groups2, titles1=None, titles2=None, link_x=True, downsample_factor=1):
         # Get list of channels we need to plot
@@ -2069,6 +2426,63 @@ class TwoWindowPlot(QtWidgets.QWidget):
             
             # Final processEvents to ensure all updates are rendered
             QtWidgets.QApplication.processEvents()
+            # After plotting, ensure cursors/zero-lines are present and positioned sensibly
+            try:
+                # Keep zero lines on top
+                try:
+                    self._zero_line1.setZValue(1_000_000)
+                    self._zero_line2.setZValue(1_000_000)
+                except Exception:
+                    pass
+                # If cursors are enabled, place verticals at 1/3 and 2/3 of current view
+                if getattr(self, "_cursors_enabled", False):
+                    try:
+                        xr, _yr = self.plot1.getViewBox().viewRange()
+                        x1 = xr[0] + (xr[1] - xr[0]) * (1.0 / 3.0)
+                        x2 = xr[0] + (xr[1] - xr[0]) * (2.0 / 3.0)
+                        self._cursor1_v.setPos(x1)
+                        self._cursor2_v.setPos(x2)
+                        for ln in (self._cursor1_v, self._cursor1_h, self._cursor2_v, self._cursor2_h):
+                            ln.show()
+                    except Exception:
+                        pass
+                # If plot2 cursors are enabled, sync x with plot1 or use its own view
+                if getattr(self, "_cursors2_enabled", False):
+                    try:
+                        x1 = float(self._cursor1_v.value())
+                        x2 = float(self._cursor2_v.value())
+                        self._p2_cursor1_v.setPos(x1)
+                        self._p2_cursor2_v.setPos(x2)
+                    except Exception:
+                        try:
+                            xr2, _yr2 = self.plot2.getViewBox().viewRange()
+                            x1b = xr2[0] + (xr2[1] - xr2[0]) * (1.0 / 3.0)
+                            x2b = xr2[0] + (xr2[1] - xr2[0]) * (2.0 / 3.0)
+                            self._p2_cursor1_v.setPos(x1b)
+                            self._p2_cursor2_v.setPos(x2b)
+                        except Exception:
+                            pass
+                    for ln in (self._p2_cursor1_v, self._p2_cursor1_h, self._p2_cursor2_v, self._p2_cursor2_h):
+                        try:
+                            ln.show()
+                        except Exception:
+                            pass
+                # Emit to refresh any labels
+                self._emit_cursor_update()
+            except Exception:
+                pass
+            # Notify UI that curves are ready/updated (refresh dropdowns)
+            try:
+                self.curvesUpdated.emit()
+            except Exception:
+                pass
+            # Re-render FFT if it was active before the reload
+            for win_id in (1, 2):
+                if self._fft_enabled.get(win_id):
+                    try:
+                        self._rebuild_fft(win_id)
+                    except Exception:
+                        pass
         finally:
             # Hide loading progress bar after plotting completes
             if self._progress_bar:
@@ -2115,6 +2529,11 @@ class TwoWindowPlot(QtWidgets.QWidget):
             self._zero_line2.setZValue(1_000_000)
         except Exception:
             pass
+        # After adding overlays, rescale axes to include new maxima
+        try:
+            self.refit_limits_to_all_data()
+        except Exception:
+            pass
 
     def clear_overlays(self):
         for it in list(self._overlay_items):
@@ -2127,6 +2546,958 @@ class TwoWindowPlot(QtWidgets.QWidget):
             except Exception:
                 pass
         self._overlay_items.clear()
+
+
+# ----------------------- Print to PDF Dialog -----------------------
+class PrintPlotDialog(QtWidgets.QDialog):
+    """Customizable PDF export for the two-window graph plots.
+    Settings are persisted across sessions in ui_settings.json under the "print_pdf" key.
+    A live matplotlib canvas previews the output as you change settings.
+    """
+
+    LINE_STYLES = [("Solid", "-"), ("Dashed", "--"), ("Dash-dot", "-."), ("Dotted", ":")]
+    # Max points per curve shown in preview (keeps it fast)
+    _PREVIEW_MAX_PTS = 3000
+
+    def __init__(self, two_plot_widget, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Print to PDF")
+        self.resize(1280, 720)
+        self.two_plot = two_plot_widget
+        self._table_p1 = None
+        self._table_p2 = None
+        self._preview_canvas = None
+        self._preview_fig    = None
+        self._preview_timer  = QtCore.QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(350)   # ms debounce
+        self._preview_timer.timeout.connect(self._update_preview)
+        self._extract_curve_data()
+        self._extract_cursor_data()
+        self._build_ui()
+        self._load_settings()
+        # First preview after UI settles
+        QtCore.QTimer.singleShot(0, self._update_preview)
+
+    # ------------------------------------------------------------------ data
+    def _extract_curve_data(self):
+        self.curves = {'plot1': [], 'plot2': []}
+        self.fft_time_data = {'plot1': {}, 'plot2': {}}
+        self.fft_view_range = {'plot1': None, 'plot2': None}  # (fmin, fmax, ymin, ymax)
+        # Track which plots are in FFT mode for PDF rendering
+        self.plot_is_fft = {
+            'plot1': bool(self.two_plot._fft_enabled.get(1)),
+            'plot2': bool(self.two_plot._fft_enabled.get(2)),
+        }
+        seen = {'plot1': set(), 'plot2': set()}
+        # For FFT-active plots, read from _fft_curves; otherwise from _curves
+        for win_id in (1, 2):
+            key = 'plot1' if win_id == 1 else 'plot2'
+            if self.plot_is_fft[key]:
+                source = {(wid, nm): c for (wid, nm), c in self.two_plot._fft_curves.items() if wid == win_id}
+                # Snapshot the current FFT ViewBox range (Hz and amplitude)
+                try:
+                    plotw = self.two_plot.plot1 if win_id == 1 else self.two_plot.plot2
+                    vr = plotw.getViewBox().viewRange()
+                    self.fft_view_range[key] = (vr[0][0], vr[0][1], vr[1][0], vr[1][1])
+                except Exception:
+                    self.fft_view_range[key] = None
+                # Also snapshot the raw time-domain data for reference
+                self.fft_time_data[key] = {}
+                for name, (tx, ty) in self.two_plot._fft_saved_data.get(win_id, {}).items():
+                    # Pen color from _fft_curves if available
+                    fc = self.two_plot._fft_curves.get((win_id, name))
+                    try:
+                        col = fc.opts['pen'].color().name()
+                    except Exception:
+                        col = '#1e90ff'
+                    if tx is not None and ty is not None:
+                        self.fft_time_data[key][name] = (
+                            np.asarray(tx, dtype=np.float64),
+                            np.asarray(ty, dtype=np.float64),
+                            col,
+                        )
+            else:
+                source = {(wid, nm): c for (wid, nm), c in self.two_plot._curves.items() if wid == win_id}
+            for (_, name), curve in source.items():
+                try:
+                    x = np.asarray(curve.xData, dtype=np.float64) if curve.xData is not None else None
+                    y = np.asarray(curve.yData, dtype=np.float64) if curve.yData is not None else None
+                except Exception:
+                    x = y = None
+                if x is None or y is None or len(x) == 0:
+                    continue
+                try:
+                    pen_color = curve.opts['pen'].color().name()
+                except Exception:
+                    pen_color = '#1e90ff'
+                if name not in seen[key]:
+                    seen[key].add(name)
+                    self.curves[key].append({
+                        'name': name, 'legend': name,
+                        'x': x, 'y': y,
+                        'color': pen_color, 'linewidth': 1.5, 'linestyle': '-',
+                    })
+        pw1_ids = {id(i) for i in self.two_plot.plot1.listDataItems()}
+        pw2_ids = {id(i) for i in self.two_plot.plot2.listDataItems()}
+        for item in self.two_plot._overlay_items:
+            try:
+                x = np.asarray(item.xData, dtype=np.float64) if item.xData is not None else None
+                y = np.asarray(item.yData, dtype=np.float64) if item.yData is not None else None
+                name = item.name() or "overlay"
+            except Exception:
+                continue
+            if x is None or y is None or len(x) == 0:
+                continue
+            try:
+                pen_color = item.opts['pen'].color().name()
+            except Exception:
+                pen_color = '#ff7f00'
+            key = 'plot1' if id(item) in pw1_ids else ('plot2' if id(item) in pw2_ids else 'plot1')
+            self.curves[key].append({
+                'name': name, 'legend': name,
+                'x': x, 'y': y,
+                'color': pen_color, 'linewidth': 1.5, 'linestyle': '-',
+            })
+
+    def _extract_cursor_data(self):
+        """Read current cursor positions and enable states from the live plot."""
+        tp = self.two_plot
+        self.cursor_data = {
+            'p1_enabled': False, 'p1_c1_x': 0.0, 'p1_c2_x': 1.0,
+            'p1_c1_y': 0.0, 'p1_c2_y': 0.0,
+            'p2_enabled': False, 'p2_c1_x': 0.0, 'p2_c2_x': 1.0,
+            'p2_c1_y': 0.0, 'p2_c2_y': 0.0,
+        }
+        try:
+            self.cursor_data.update({
+                'p1_enabled': bool(getattr(tp, '_cursors_enabled', False)),
+                'p1_c1_x': float(tp._cursor1_v.value()),
+                'p1_c2_x': float(tp._cursor2_v.value()),
+                'p1_c1_y': float(tp._cursor1_h.value()),
+                'p1_c2_y': float(tp._cursor2_h.value()),
+            })
+        except Exception:
+            pass
+        try:
+            self.cursor_data.update({
+                'p2_enabled': bool(getattr(tp, '_cursors2_enabled', False)),
+                'p2_c1_x': float(tp._p2_cursor1_v.value()),
+                'p2_c2_x': float(tp._p2_cursor2_v.value()),
+                'p2_c1_y': float(tp._p2_cursor1_h.value()),
+                'p2_c2_y': float(tp._p2_cursor2_h.value()),
+            })
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self):
+        root = QtWidgets.QHBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(8)
+
+        # ---- LEFT: tabs + buttons ----
+        left_w = QtWidgets.QWidget()
+        left_w.setFixedWidth(480)
+        left_vbox = QtWidgets.QVBoxLayout(left_w)
+        left_vbox.setContentsMargins(0, 0, 0, 0)
+
+        tabs = QtWidgets.QTabWidget()
+        tabs.addTab(self._build_layout_tab(),        "Layout")
+        tabs.addTab(self._build_curves_tab('plot1'),  "Plot 1 Curves")
+        tabs.addTab(self._build_curves_tab('plot2'),  "Plot 2 Curves")
+        tabs.addTab(self._build_appearance_tab(),     "Appearance")
+        tabs.addTab(self._build_cursors_tab(),        "Cursors")
+        left_vbox.addWidget(tabs)
+
+        btns = QtWidgets.QHBoxLayout()
+        save_btn  = QtWidgets.QPushButton("Save PDF…")
+        save_btn.setDefault(True)
+        save_btn.clicked.connect(self._save_pdf)
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        btns.addStretch()
+        btns.addWidget(save_btn)
+        btns.addWidget(close_btn)
+        left_vbox.addLayout(btns)
+
+        root.addWidget(left_w)
+
+        # ---- RIGHT: live preview ----
+        right_w = QtWidgets.QWidget()
+        right_vbox = QtWidgets.QVBoxLayout(right_w)
+        right_vbox.setContentsMargins(0, 0, 0, 0)
+
+        preview_lbl = QtWidgets.QLabel("Preview")
+        preview_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        right_vbox.addWidget(preview_lbl)
+
+        try:
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+            self._preview_fig = Figure(figsize=(7, 5), dpi=90)
+            self._preview_canvas = FigureCanvas(self._preview_fig)
+            self._preview_canvas.setMinimumSize(400, 300)
+            right_vbox.addWidget(self._preview_canvas, 1)
+        except Exception:
+            fallback = QtWidgets.QLabel("(preview unavailable)")
+            fallback.setAlignment(QtCore.Qt.AlignCenter)
+            right_vbox.addWidget(fallback, 1)
+
+        root.addWidget(right_w, 1)
+
+    # ------------------------------------------------------------------ Layout tab
+    def _build_layout_tab(self):
+        w = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(w)
+
+        plot_row = QtWidgets.QHBoxLayout()
+        self.chk_plot1 = QtWidgets.QCheckBox("Plot 1")
+        self.chk_plot1.setChecked(bool(self.curves['plot1']))
+        self.chk_plot2 = QtWidgets.QCheckBox("Plot 2")
+        self.chk_plot2.setChecked(bool(self.curves['plot2']))
+        self.chk_plot1.toggled.connect(self._schedule_preview)
+        self.chk_plot2.toggled.connect(self._schedule_preview)
+        plot_row.addWidget(self.chk_plot1); plot_row.addWidget(self.chk_plot2); plot_row.addStretch()
+        form.addRow("Include:", plot_row)
+
+        self.edit_title1 = QtWidgets.QLineEdit("Plot 1")
+        self.edit_title2 = QtWidgets.QLineEdit("Plot 2")
+        try:
+            t = self.two_plot.plot1.plotItem.titleLabel.text
+            if t: self.edit_title1.setText(t)
+        except Exception:
+            pass
+        try:
+            t = self.two_plot.plot2.plotItem.titleLabel.text
+            if t: self.edit_title2.setText(t)
+        except Exception:
+            pass
+        self.edit_title1.textChanged.connect(self._schedule_preview)
+        self.edit_title2.textChanged.connect(self._schedule_preview)
+        form.addRow("Plot 1 Title:", self.edit_title1)
+        form.addRow("Plot 2 Title:", self.edit_title2)
+
+        self.edit_xlabel  = QtWidgets.QLineEdit("Time (s)")
+        self.edit_ylabel1 = QtWidgets.QLineEdit("")
+        self.edit_ylabel2 = QtWidgets.QLineEdit("")
+        for e in (self.edit_xlabel, self.edit_ylabel1, self.edit_ylabel2):
+            e.textChanged.connect(self._schedule_preview)
+        form.addRow("X Label:",          self.edit_xlabel)
+        form.addRow("Y Label (Plot 1):", self.edit_ylabel1)
+        form.addRow("Y Label (Plot 2):", self.edit_ylabel2)
+
+        xrange_row = QtWidgets.QHBoxLayout()
+        self.chk_use_visible = QtWidgets.QCheckBox("Crop to current visible X range")
+        self.chk_use_visible.setChecked(True)
+        self.chk_use_visible.toggled.connect(self._schedule_preview)
+        xrange_row.addWidget(self.chk_use_visible); xrange_row.addStretch()
+        form.addRow("X Range:", xrange_row)
+
+        xaxis_row = QtWidgets.QHBoxLayout()
+        self.chk_relative_time = QtWidgets.QCheckBox("Relative time (start at 0)")
+        self.chk_relative_time.setChecked(False)
+        self.chk_relative_time.toggled.connect(self._schedule_preview)
+        self.combo_time_unit = QtWidgets.QComboBox()
+        self.combo_time_unit.addItem("Seconds (s)", "s")
+        self.combo_time_unit.addItem("Milliseconds (ms)", "ms")
+        self.combo_time_unit.addItem("Microseconds (µs)", "us")
+        self.combo_time_unit.currentIndexChanged.connect(self._on_time_unit_changed)
+        self.combo_time_unit.currentIndexChanged.connect(self._schedule_preview)
+        xaxis_row.addWidget(self.chk_relative_time)
+        xaxis_row.addSpacing(12)
+        xaxis_row.addWidget(QtWidgets.QLabel("Unit:"))
+        xaxis_row.addWidget(self.combo_time_unit)
+        xaxis_row.addStretch()
+        form.addRow("X Axis:", xaxis_row)
+
+        size_row = QtWidgets.QHBoxLayout()
+        self.spin_width = QtWidgets.QDoubleSpinBox()
+        self.spin_width.setRange(4, 30); self.spin_width.setValue(12); self.spin_width.setSuffix(" in")
+        self.spin_height = QtWidgets.QDoubleSpinBox()
+        self.spin_height.setRange(2, 20); self.spin_height.setValue(8); self.spin_height.setSuffix(" in")
+        self.spin_dpi = QtWidgets.QSpinBox()
+        self.spin_dpi.setRange(72, 600); self.spin_dpi.setValue(300)
+        size_row.addWidget(QtWidgets.QLabel("W:")); size_row.addWidget(self.spin_width)
+        size_row.addSpacing(8)
+        size_row.addWidget(QtWidgets.QLabel("H:")); size_row.addWidget(self.spin_height)
+        size_row.addSpacing(8)
+        size_row.addWidget(QtWidgets.QLabel("DPI:")); size_row.addWidget(self.spin_dpi)
+        size_row.addStretch()
+        form.addRow("Figure Size:", size_row)
+        return w
+
+    # ------------------------------------------------------------------ Curves tab
+    def _build_curves_tab(self, plot_key: str):
+        w = QtWidgets.QWidget()
+        vbox = QtWidgets.QVBoxLayout(w)
+        curves = self.curves[plot_key]
+        if not curves:
+            vbox.addWidget(QtWidgets.QLabel("No data plotted in this window."))
+            return w
+
+        tbl = QtWidgets.QTableWidget(len(curves), 5)
+        tbl.setHorizontalHeaderLabels(["Channel", "Legend Name", "Color", "Line Style", "Width"])
+        hdr = tbl.horizontalHeader()
+        hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeToContents)
+        tbl.verticalHeader().setVisible(False)
+        tbl.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        # Legend name edits trigger preview
+        tbl.itemChanged.connect(lambda _: self._schedule_preview())
+
+        for row, curve in enumerate(curves):
+            item = QtWidgets.QTableWidgetItem(curve['name'])
+            item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
+            tbl.setItem(row, 0, item)
+            tbl.setItem(row, 1, QtWidgets.QTableWidgetItem(curve['legend']))
+
+            color_btn = QtWidgets.QPushButton()
+            color_btn.setFixedWidth(52)
+            color_btn.setStyleSheet(f"background-color: {curve['color']}; border: 1px solid #888;")
+            color_btn.setProperty("hex_color", curve['color'])
+            def _make_color_cb(btn, c):
+                def pick():
+                    chosen = QtWidgets.QColorDialog.getColor(QtGui.QColor(btn.property("hex_color")), self)
+                    if chosen.isValid():
+                        h = chosen.name()
+                        btn.setStyleSheet(f"background-color: {h}; border: 1px solid #888;")
+                        btn.setProperty("hex_color", h)
+                        c['color'] = h
+                        self._schedule_preview()
+                btn.clicked.connect(pick)
+            _make_color_cb(color_btn, curve)
+            tbl.setCellWidget(row, 2, color_btn)
+
+            style_combo = QtWidgets.QComboBox()
+            for ls_name, ls_val in self.LINE_STYLES:
+                style_combo.addItem(ls_name, ls_val)
+            def _make_style_cb(combo, c):
+                combo.currentIndexChanged.connect(lambda _: (c.update({'linestyle': combo.currentData()}), self._schedule_preview()))
+            _make_style_cb(style_combo, curve)
+            tbl.setCellWidget(row, 3, style_combo)
+
+            w_spin = QtWidgets.QDoubleSpinBox()
+            w_spin.setRange(0.5, 8.0); w_spin.setValue(1.5); w_spin.setSingleStep(0.5)
+            def _make_width_cb(spin, c):
+                spin.valueChanged.connect(lambda v: (c.update({'linewidth': v}), self._schedule_preview()))
+            _make_width_cb(w_spin, curve)
+            tbl.setCellWidget(row, 4, w_spin)
+
+        if plot_key == 'plot1':
+            self._table_p1 = tbl
+        else:
+            self._table_p2 = tbl
+
+        vbox.addWidget(tbl)
+        return w
+
+    # ------------------------------------------------------------------ Appearance tab
+    def _build_appearance_tab(self):
+        w = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(w)
+
+        bg_row = QtWidgets.QHBoxLayout()
+        self._bg_grp = QtWidgets.QButtonGroup(self)
+        self.radio_white       = QtWidgets.QRadioButton("White")
+        self.radio_transparent = QtWidgets.QRadioButton("Transparent")
+        self.radio_white.setChecked(True)
+        self._bg_grp.addButton(self.radio_white)
+        self._bg_grp.addButton(self.radio_transparent)
+        self.radio_white.toggled.connect(self._schedule_preview)
+        self.radio_transparent.toggled.connect(self._schedule_preview)
+        bg_row.addWidget(self.radio_white); bg_row.addWidget(self.radio_transparent); bg_row.addStretch()
+        form.addRow("Background:", bg_row)
+
+        grid_row = QtWidgets.QHBoxLayout()
+        self.chk_grid = QtWidgets.QCheckBox("Major grid"); self.chk_grid.setChecked(True)
+        self.chk_minor_grid = QtWidgets.QCheckBox("Minor grid"); self.chk_minor_grid.setChecked(False)
+        self.spin_grid_alpha = QtWidgets.QDoubleSpinBox()
+        self.spin_grid_alpha.setRange(0.05, 1.0); self.spin_grid_alpha.setValue(0.3); self.spin_grid_alpha.setSingleStep(0.05)
+        self.chk_grid.toggled.connect(self._schedule_preview)
+        self.chk_minor_grid.toggled.connect(self._schedule_preview)
+        self.spin_grid_alpha.valueChanged.connect(self._schedule_preview)
+        grid_row.addWidget(self.chk_grid); grid_row.addWidget(self.chk_minor_grid)
+        grid_row.addSpacing(10)
+        grid_row.addWidget(QtWidgets.QLabel("Alpha:")); grid_row.addWidget(self.spin_grid_alpha)
+        grid_row.addStretch()
+        form.addRow("Grid:", grid_row)
+
+        legend_row = QtWidgets.QHBoxLayout()
+        self.chk_legend = QtWidgets.QCheckBox("Show legend"); self.chk_legend.setChecked(True)
+        self.combo_legend_pos = QtWidgets.QComboBox()
+        for pos in ["best", "upper right", "upper left", "lower right", "lower left", "outside right"]:
+            self.combo_legend_pos.addItem(pos)
+        self.chk_legend.toggled.connect(self._schedule_preview)
+        self.combo_legend_pos.currentIndexChanged.connect(self._schedule_preview)
+        legend_row.addWidget(self.chk_legend); legend_row.addSpacing(8)
+        legend_row.addWidget(QtWidgets.QLabel("Position:")); legend_row.addWidget(self.combo_legend_pos)
+        legend_row.addStretch()
+        form.addRow("Legend:", legend_row)
+
+        fonts_row = QtWidgets.QHBoxLayout()
+        self.spin_fs_title  = QtWidgets.QSpinBox(); self.spin_fs_title.setRange(6, 28);  self.spin_fs_title.setValue(12)
+        self.spin_fs_label  = QtWidgets.QSpinBox(); self.spin_fs_label.setRange(6, 24);  self.spin_fs_label.setValue(10)
+        self.spin_fs_tick   = QtWidgets.QSpinBox(); self.spin_fs_tick.setRange(6, 20);   self.spin_fs_tick.setValue(9)
+        self.spin_fs_legend = QtWidgets.QSpinBox(); self.spin_fs_legend.setRange(6, 20); self.spin_fs_legend.setValue(9)
+        for spin in (self.spin_fs_title, self.spin_fs_label, self.spin_fs_tick, self.spin_fs_legend):
+            spin.valueChanged.connect(self._schedule_preview)
+        for lbl, spin in [("Title:", self.spin_fs_title), ("Axis:", self.spin_fs_label),
+                          ("Tick:",  self.spin_fs_tick),  ("Legend:", self.spin_fs_legend)]:
+            fonts_row.addWidget(QtWidgets.QLabel(lbl)); fonts_row.addWidget(spin); fonts_row.addSpacing(6)
+        fonts_row.addStretch()
+        form.addRow("Font Sizes:", fonts_row)
+        return w
+
+    # ------------------------------------------------------------------ Cursors tab
+    def _build_cursors_tab(self):
+        w = QtWidgets.QWidget()
+        vbox = QtWidgets.QVBoxLayout(w)
+        vbox.setSpacing(10)
+
+        cd = self.cursor_data
+        p1_en = cd.get('p1_enabled', False)
+        p2_en = cd.get('p2_enabled', False)
+
+        def _fmt_x(v):
+            try:
+                tu = self.combo_time_unit.currentData()
+                xs = {'s': 1.0, 'ms': 1e3, 'us': 1e6}.get(tu, 1.0)
+                return f"{float(v) * xs:.6g} {tu}"
+            except Exception:
+                return str(v)
+
+        def _make_group(prefix, title, enabled, c1_x, c2_x, c1_y, c2_y):
+            grp = QtWidgets.QGroupBox(title)
+            grp.setEnabled(enabled)
+            fl = QtWidgets.QVBoxLayout(grp)
+            fl.setSpacing(5)
+
+            chk_c1    = QtWidgets.QCheckBox(f"Cursor 1  (x = {_fmt_x(c1_x)},  y = {c1_y:.4g})")
+            chk_c2    = QtWidgets.QCheckBox(f"Cursor 2  (x = {_fmt_x(c2_x)},  y = {c2_y:.4g})")
+            chk_arrow = QtWidgets.QCheckBox(f"Δt arrow between cursors  (Δt = {_fmt_x(abs(c2_x - c1_x))})")
+            chk_y     = QtWidgets.QCheckBox("Y value labels at each cursor")
+            chk_c1.setChecked(enabled)
+            chk_c2.setChecked(enabled)
+            chk_arrow.setChecked(enabled)
+            chk_y.setChecked(False)
+            for chk in (chk_c1, chk_c2, chk_arrow, chk_y):
+                chk.toggled.connect(self._schedule_preview)
+                fl.addWidget(chk)
+
+            setattr(self, f'_chk_cur_{prefix}_c1',    chk_c1)
+            setattr(self, f'_chk_cur_{prefix}_c2',    chk_c2)
+            setattr(self, f'_chk_cur_{prefix}_arrow', chk_arrow)
+            setattr(self, f'_chk_cur_{prefix}_y',     chk_y)
+            return grp
+
+        grp1 = _make_group('p1', 'Plot 1 Cursors', p1_en,
+                            cd['p1_c1_x'], cd['p1_c2_x'], cd['p1_c1_y'], cd['p1_c2_y'])
+        grp2 = _make_group('p2', 'Plot 2 Cursors', p2_en,
+                            cd['p2_c1_x'], cd['p2_c2_x'], cd['p2_c1_y'], cd['p2_c2_y'])
+        vbox.addWidget(grp1)
+        vbox.addWidget(grp2)
+
+        if not p1_en and not p2_en:
+            note = QtWidgets.QLabel("Enable Cursors or Cursors P2 in the graph view to use these options.")
+            note.setStyleSheet("color: #888; font-style: italic;")
+            vbox.addWidget(note)
+
+        vbox.addStretch()
+        return w
+
+    def _chk_cur(self, prefix, key, default=False):
+        """Safely read a cursor checkbox value."""
+        w = getattr(self, f'_chk_cur_{prefix}_{key}', None)
+        return w.isChecked() if w is not None else default
+
+    # ------------------------------------------------------------------ helpers
+    def _schedule_preview(self, *_):
+        self._preview_timer.start()
+
+    def _on_time_unit_changed(self):
+        import re
+        unit_suffix = {'s': '(s)', 'ms': '(ms)', 'us': '(µs)'}.get(
+            self.combo_time_unit.currentData(), '(s)')
+        text = re.sub(r'\s*\((s|ms|µs|us)\)\s*$', '', self.edit_xlabel.text()).rstrip()
+        self.edit_xlabel.setText(f"{text} {unit_suffix}".strip())
+
+    def _sync_legend_names(self):
+        for plot_key, table in [('plot1', self._table_p1), ('plot2', self._table_p2)]:
+            if table is None:
+                continue
+            for row, curve in enumerate(self.curves[plot_key]):
+                item = table.item(row, 1)
+                if item:
+                    curve['legend'] = item.text()
+
+    def _get_visible_xrange(self):
+        try:
+            xr = self.two_plot.plot1.getViewBox().viewRange()[0]
+            return float(xr[0]), float(xr[1])
+        except Exception:
+            return None, None
+
+    def _collect_render_params(self):
+        """Return a dict of all current render settings."""
+        self._sync_legend_names()
+        xmin, xmax = (None, None)
+        if self.chk_use_visible.isChecked():
+            xmin, xmax = self._get_visible_xrange()
+        return dict(
+            include_p1   = self.chk_plot1.isChecked() and bool(self.curves['plot1']),
+            include_p2   = self.chk_plot2.isChecked() and bool(self.curves['plot2']),
+            title1       = self.edit_title1.text(),
+            title2       = self.edit_title2.text(),
+            xlabel       = self.edit_xlabel.text(),
+            ylabel1      = self.edit_ylabel1.text(),
+            ylabel2      = self.edit_ylabel2.text(),
+            transparent  = self.radio_transparent.isChecked(),
+            show_grid    = self.chk_grid.isChecked(),
+            show_minor   = self.chk_minor_grid.isChecked(),
+            grid_alpha   = self.spin_grid_alpha.value(),
+            show_legend  = self.chk_legend.isChecked(),
+            legend_pos   = self.combo_legend_pos.currentText(),
+            fs_title     = self.spin_fs_title.value(),
+            fs_label     = self.spin_fs_label.value(),
+            fs_tick      = self.spin_fs_tick.value(),
+            fs_legend    = self.spin_fs_legend.value(),
+            xmin          = xmin,
+            xmax          = xmax,
+            relative_time = self.chk_relative_time.isChecked(),
+            time_unit     = self.combo_time_unit.currentData(),
+            # Cursor overlay
+            cursor_p1_enabled = self.cursor_data.get('p1_enabled', False),
+            cursor_p1_c1_x    = self.cursor_data.get('p1_c1_x', 0.0),
+            cursor_p1_c2_x    = self.cursor_data.get('p1_c2_x', 0.0),
+            cursor_p1_c1_y    = self.cursor_data.get('p1_c1_y', 0.0),
+            cursor_p1_c2_y    = self.cursor_data.get('p1_c2_y', 0.0),
+            cursor_p1_show_c1    = self._chk_cur('p1', 'c1'),
+            cursor_p1_show_c2    = self._chk_cur('p1', 'c2'),
+            cursor_p1_show_arrow = self._chk_cur('p1', 'arrow'),
+            cursor_p1_show_y     = self._chk_cur('p1', 'y'),
+            cursor_p2_enabled = self.cursor_data.get('p2_enabled', False),
+            cursor_p2_c1_x    = self.cursor_data.get('p2_c1_x', 0.0),
+            cursor_p2_c2_x    = self.cursor_data.get('p2_c2_x', 0.0),
+            cursor_p2_c1_y    = self.cursor_data.get('p2_c1_y', 0.0),
+            cursor_p2_c2_y    = self.cursor_data.get('p2_c2_y', 0.0),
+            cursor_p2_show_c1    = self._chk_cur('p2', 'c1'),
+            cursor_p2_show_c2    = self._chk_cur('p2', 'c2'),
+            cursor_p2_show_arrow = self._chk_cur('p2', 'arrow'),
+            cursor_p2_show_y     = self._chk_cur('p2', 'y'),
+        )
+
+    def _render_to_figure(self, fig, params, downsample=1):
+        """Draw curves onto fig using params. downsample>1 for preview speed."""
+        include_p1  = params['include_p1']
+        include_p2  = params['include_p2']
+        transparent = params['transparent']
+        show_grid   = params['show_grid']
+        show_minor  = params['show_minor']
+        grid_alpha  = params['grid_alpha']
+        show_legend = params['show_legend']
+        legend_pos  = params['legend_pos']
+        fs_title    = params['fs_title']
+        fs_label    = params['fs_label']
+        fs_tick     = params['fs_tick']
+        fs_legend   = params['fs_legend']
+        xlabel        = params['xlabel']
+        xmin          = params['xmin']
+        xmax          = params['xmax']
+        relative_time = params.get('relative_time', False)
+        time_unit     = params.get('time_unit', 's')
+
+        x_scale  = {'s': 1.0, 'ms': 1e3, 'us': 1e6}.get(time_unit, 1.0)
+        x_offset = (xmin if (relative_time and xmin is not None) else 0.0)
+
+        fig.clear()
+        n_axes   = int(include_p1) + int(include_p2)
+        if n_axes == 0:
+            fig.text(0.5, 0.5, "No plots selected", ha='center', va='center')
+            return
+
+        bg_color = 'none' if transparent else 'white'
+        fig.patch.set_facecolor(bg_color if not transparent else 'white')
+
+        plot_spec = []
+        if include_p1:
+            plot_spec.append(('plot1', params['title1'], params['ylabel1']))
+        if include_p2:
+            plot_spec.append(('plot2', params['title2'], params['ylabel2']))
+
+        # Only share x-axis when both visible plots are in the same domain
+        fft_flags = [self.plot_is_fft.get(pk, False) for pk, _, _ in plot_spec]
+        can_share_x = (n_axes > 1) and (len(set(fft_flags)) == 1)
+
+        axes = []
+        shared_ax = None
+        for i in range(n_axes):
+            kw = {'sharex': shared_ax} if (shared_ax is not None and can_share_x) else {}
+            ax = fig.add_subplot(n_axes, 1, i + 1, **kw)
+            if shared_ax is None:
+                shared_ax = ax
+            axes.append(ax)
+
+        for (plot_key, title, ylabel), ax in zip(plot_spec, axes):
+            is_fft = self.plot_is_fft.get(plot_key, False)
+            ax.set_facecolor('white')
+            for c in self.curves[plot_key]:
+                x, y = c['x'], c['y']
+                if not is_fft and xmin is not None and xmax is not None:
+                    mask = (x >= xmin) & (x <= xmax)
+                    x, y = x[mask], y[mask]
+                if len(x) == 0:
+                    continue
+                if downsample > 1:
+                    x = x[::downsample]
+                    y = y[::downsample]
+                if not is_fft:
+                    x = (x - x_offset) * x_scale
+                ax.plot(x, y, label=c['legend'], color=c['color'],
+                        linewidth=c['linewidth'], linestyle=c['linestyle'],
+                        antialiased=True)
+            if title:
+                ax.set_title(title, fontsize=fs_title, fontweight='bold', pad=6)
+            # Y label: use FFT-specific label if in FFT mode and no user override
+            eff_ylabel = ylabel
+            if is_fft and not ylabel:
+                tp = self.two_plot
+                win_id = 1 if plot_key == 'plot1' else 2
+                eff_ylabel = 'Magnitude (dB)' if tp._fft_log.get(win_id) else 'Amplitude'
+            if eff_ylabel:
+                ax.set_ylabel(eff_ylabel, fontsize=fs_label)
+            ax.tick_params(axis='both', which='major', labelsize=fs_tick)
+            if show_grid:
+                ax.grid(True, which='major', alpha=grid_alpha, linestyle='--', linewidth=0.5)
+                ax.set_axisbelow(True)
+            if show_minor:
+                ax.minorticks_on()
+                ax.grid(True, which='minor', alpha=grid_alpha * 0.4, linestyle=':', linewidth=0.3)
+            if show_legend:
+                outside = "outside" in legend_pos
+                loc  = "upper left" if outside else legend_pos
+                bbox = (1.01, 1.0) if outside else None
+                leg  = ax.legend(loc=loc, bbox_to_anchor=bbox, fontsize=fs_legend,
+                                 framealpha=0.85, edgecolor='#cccccc', fancybox=False)
+                if transparent:
+                    leg.get_frame().set_alpha(0.6)
+            for spine in ax.spines.values():
+                spine.set_linewidth(0.8)
+            if is_fft:
+                # Apply the live FFT ViewBox range when crop is requested
+                vr = self.fft_view_range.get(plot_key)
+                if xmin is not None and vr is not None:
+                    fmin, fmax, fymin, fymax = vr
+                    if fmax > fmin:
+                        ax.set_xlim(fmin, fmax)
+                    if fymax > fymin:
+                        ax.set_ylim(fymin, fymax)
+                ax.set_xlabel('Frequency (Hz)', fontsize=fs_label)
+            else:
+                if xmin is not None and xmax is not None and xmax > xmin:
+                    ax.set_xlim((xmin - x_offset) * x_scale, (xmax - x_offset) * x_scale)
+                # Draw cursor overlays (only for time-domain plots)
+                cur_prefix = 'p1' if plot_key == 'plot1' else 'p2'
+                self._draw_cursors_on_ax(ax, cur_prefix, params, x_scale, x_offset, xmin, xmax)
+
+        # Bottom x-label for non-FFT last axis
+        if axes and not self.plot_is_fft.get(plot_spec[-1][0], False):
+            axes[-1].set_xlabel(xlabel, fontsize=fs_label)
+        try:
+            fig.tight_layout(pad=1.2)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ cursor drawing
+    _CURSOR_COLORS = {'p1_c1': '#000000', 'p1_c2': '#000000',
+                      'p2_c1': '#000000', 'p2_c2': '#000000'}
+
+    def _draw_cursors_on_ax(self, ax, prefix, params, x_scale, x_offset, xmin, xmax):
+        """Draw cursor lines, Δt arrow, and Y labels onto a matplotlib Axes."""
+        if not params.get(f'cursor_{prefix}_enabled'):
+            return
+        show_c1    = params.get(f'cursor_{prefix}_show_c1',    False)
+        show_c2    = params.get(f'cursor_{prefix}_show_c2',    False)
+        show_arrow = params.get(f'cursor_{prefix}_show_arrow', False)
+        show_y     = params.get(f'cursor_{prefix}_show_y',     False)
+        if not (show_c1 or show_c2):
+            return
+
+        c1_xr = params.get(f'cursor_{prefix}_c1_x', 0.0)
+        c2_xr = params.get(f'cursor_{prefix}_c2_x', 0.0)
+        c1_y  = params.get(f'cursor_{prefix}_c1_y', 0.0)
+        c2_y  = params.get(f'cursor_{prefix}_c2_y', 0.0)
+        c1_xs = (c1_xr - x_offset) * x_scale
+        c2_xs = (c2_xr - x_offset) * x_scale
+
+        def in_range(xv):
+            if xmin is not None and xmax is not None:
+                return xmin <= xv <= xmax
+            return True
+
+        col1 = self._CURSOR_COLORS[f'{prefix}_c1']
+        col2 = self._CURSOR_COLORS[f'{prefix}_c2']
+        fs   = max(6, params.get('fs_tick', 9) - 1)
+
+        if show_c1 and in_range(c1_xr):
+            ax.axvline(c1_xs, color=col1, linestyle='--', linewidth=1.0, alpha=0.9, zorder=10)
+        if show_c2 and in_range(c2_xr):
+            ax.axvline(c2_xs, color=col2, linestyle='--', linewidth=1.0, alpha=0.9, zorder=10)
+
+        # Δt double-headed arrow
+        if show_arrow and show_c1 and show_c2 and in_range(c1_xr) and in_range(c2_xr):
+            ylim = ax.get_ylim()
+            arrow_y = ylim[0] + (ylim[1] - ylim[0]) * 0.93
+            ax.annotate('', xy=(c2_xs, arrow_y), xytext=(c1_xs, arrow_y),
+                        arrowprops=dict(arrowstyle='<->', color='#333333',
+                                        lw=1.1, mutation_scale=10),
+                        annotation_clip=False, zorder=11)
+            time_unit = params.get('time_unit', 's')
+            delta = abs(c2_xr - c1_xr) * x_scale
+            ax.text((c1_xs + c2_xs) / 2.0, arrow_y,
+                    f'  Δt = {delta:.4g} {time_unit}',
+                    ha='center', va='bottom', fontsize=fs, color='#333333', zorder=12,
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                              edgecolor='none', alpha=0.75))
+
+        # Y value labels at each cursor
+        if show_y:
+            xlim = ax.get_xlim()
+            x_span = (xlim[1] - xlim[0]) or 1.0
+            nudge = x_span * 0.012
+            if show_c1 and in_range(c1_xr):
+                ax.annotate(f'y1={c1_y:.4g}',
+                            xy=(c1_xs, c1_y), xytext=(c1_xs + nudge, c1_y),
+                            fontsize=fs, color='#000000', va='center', ha='left', zorder=12,
+                            bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
+                                      edgecolor='none', alpha=0.8))
+            if show_c2 and in_range(c2_xr):
+                ax.annotate(f'y2={c2_y:.4g}',
+                            xy=(c2_xs, c2_y), xytext=(c2_xs + nudge, c2_y),
+                            fontsize=fs, color='#000000', va='center', ha='left', zorder=12,
+                            bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
+                                      edgecolor='none', alpha=0.8))
+
+    # ------------------------------------------------------------------ preview
+    def _update_preview(self):
+        if self._preview_canvas is None or self._preview_fig is None:
+            return
+        try:
+            params = self._collect_render_params()
+            # Compute downsample so preview never exceeds _PREVIEW_MAX_PTS per curve
+            all_curves = self.curves['plot1'] + self.curves['plot2']
+            max_len = max((len(c['x']) for c in all_curves), default=1)
+            ds = max(1, int(np.ceil(max_len / self._PREVIEW_MAX_PTS)))
+            self._render_to_figure(self._preview_fig, params, downsample=ds)
+            self._preview_canvas.draw_idle()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ persist
+    def _settings_to_dict(self):
+        self._sync_legend_names()
+        curve_overrides = {}
+        for pk in ('plot1', 'plot2'):
+            for c in self.curves[pk]:
+                curve_overrides[c['name']] = {
+                    'color': c['color'],
+                    'linewidth': c['linewidth'],
+                    'linestyle': c['linestyle'],
+                    'legend': c['legend'],
+                }
+        return {
+            'title1':      self.edit_title1.text(),
+            'title2':      self.edit_title2.text(),
+            'xlabel':      self.edit_xlabel.text(),
+            'ylabel1':     self.edit_ylabel1.text(),
+            'ylabel2':     self.edit_ylabel2.text(),
+            'use_visible': self.chk_use_visible.isChecked(),
+            'fig_width':   self.spin_width.value(),
+            'fig_height':  self.spin_height.value(),
+            'dpi':         self.spin_dpi.value(),
+            'transparent': self.radio_transparent.isChecked(),
+            'grid':        self.chk_grid.isChecked(),
+            'minor_grid':  self.chk_minor_grid.isChecked(),
+            'grid_alpha':  self.spin_grid_alpha.value(),
+            'legend':      self.chk_legend.isChecked(),
+            'legend_pos':  self.combo_legend_pos.currentText(),
+            'fs_title':    self.spin_fs_title.value(),
+            'fs_label':    self.spin_fs_label.value(),
+            'fs_tick':     self.spin_fs_tick.value(),
+            'fs_legend':      self.spin_fs_legend.value(),
+            'relative_time':  self.chk_relative_time.isChecked(),
+            'time_unit':      self.combo_time_unit.currentData(),
+            'curve_overrides': curve_overrides,
+            'cursor_p1_show_c1':    self._chk_cur('p1', 'c1'),
+            'cursor_p1_show_c2':    self._chk_cur('p1', 'c2'),
+            'cursor_p1_show_arrow': self._chk_cur('p1', 'arrow'),
+            'cursor_p1_show_y':     self._chk_cur('p1', 'y'),
+            'cursor_p2_show_c1':    self._chk_cur('p2', 'c1'),
+            'cursor_p2_show_c2':    self._chk_cur('p2', 'c2'),
+            'cursor_p2_show_arrow': self._chk_cur('p2', 'arrow'),
+            'cursor_p2_show_y':     self._chk_cur('p2', 'y'),
+        }
+
+    def _load_settings(self):
+        try:
+            s = _load_ui_settings().get('print_pdf', {})
+            if not s:
+                return
+        except Exception:
+            return
+
+        def _set(widget, key, apply):
+            try:
+                if key in s:
+                    apply(widget, s[key])
+            except Exception:
+                pass
+
+        _set(self.edit_title1,       'title1',      lambda w, v: w.setText(v))
+        _set(self.edit_title2,       'title2',      lambda w, v: w.setText(v))
+        _set(self.edit_xlabel,       'xlabel',      lambda w, v: w.setText(v))
+        _set(self.edit_ylabel1,      'ylabel1',     lambda w, v: w.setText(v))
+        _set(self.edit_ylabel2,      'ylabel2',     lambda w, v: w.setText(v))
+        _set(self.chk_use_visible,   'use_visible', lambda w, v: w.setChecked(bool(v)))
+        _set(self.spin_width,        'fig_width',   lambda w, v: w.setValue(float(v)))
+        _set(self.spin_height,       'fig_height',  lambda w, v: w.setValue(float(v)))
+        _set(self.spin_dpi,          'dpi',         lambda w, v: w.setValue(int(v)))
+        _set(self.chk_grid,          'grid',        lambda w, v: w.setChecked(bool(v)))
+        _set(self.chk_minor_grid,    'minor_grid',  lambda w, v: w.setChecked(bool(v)))
+        _set(self.spin_grid_alpha,   'grid_alpha',  lambda w, v: w.setValue(float(v)))
+        _set(self.chk_legend,        'legend',      lambda w, v: w.setChecked(bool(v)))
+        _set(self.spin_fs_title,     'fs_title',    lambda w, v: w.setValue(int(v)))
+        _set(self.spin_fs_label,     'fs_label',    lambda w, v: w.setValue(int(v)))
+        _set(self.spin_fs_tick,      'fs_tick',     lambda w, v: w.setValue(int(v)))
+        _set(self.spin_fs_legend,    'fs_legend',    lambda w, v: w.setValue(int(v)))
+        _set(self.chk_relative_time, 'relative_time', lambda w, v: w.setChecked(bool(v)))
+        for _pk in ('p1', 'p2'):
+            for _k in ('c1', 'c2', 'arrow', 'y'):
+                _w = getattr(self, f'_chk_cur_{_pk}_{_k}', None)
+                if _w is not None and f'cursor_{_pk}_show_{_k}' in s:
+                    try:
+                        _w.setChecked(bool(s[f'cursor_{_pk}_show_{_k}']))
+                    except Exception:
+                        pass
+
+        try:
+            tu = s.get('time_unit', 's')
+            idx = self.combo_time_unit.findData(tu)
+            if idx >= 0:
+                self.combo_time_unit.blockSignals(True)
+                self.combo_time_unit.setCurrentIndex(idx)
+                self.combo_time_unit.blockSignals(False)
+        except Exception:
+            pass
+
+        try:
+            if s.get('transparent'):
+                self.radio_transparent.setChecked(True)
+            else:
+                self.radio_white.setChecked(True)
+        except Exception:
+            pass
+
+        try:
+            lp = s.get('legend_pos', '')
+            idx = self.combo_legend_pos.findText(lp)
+            if idx >= 0:
+                self.combo_legend_pos.setCurrentIndex(idx)
+        except Exception:
+            pass
+
+        # Restore per-curve overrides matched by channel name
+        overrides = s.get('curve_overrides', {})
+        if overrides:
+            for pk in ('plot1', 'plot2'):
+                tbl = self._table_p1 if pk == 'plot1' else self._table_p2
+                for row, curve in enumerate(self.curves[pk]):
+                    ov = overrides.get(curve['name'])
+                    if not ov:
+                        continue
+                    curve['color']     = ov.get('color',     curve['color'])
+                    curve['linewidth'] = ov.get('linewidth', curve['linewidth'])
+                    curve['linestyle'] = ov.get('linestyle', curve['linestyle'])
+                    curve['legend']    = ov.get('legend',    curve['legend'])
+                    if tbl is None:
+                        continue
+                    # Update color button
+                    btn = tbl.cellWidget(row, 2)
+                    if btn:
+                        btn.setStyleSheet(f"background-color: {curve['color']}; border: 1px solid #888;")
+                        btn.setProperty("hex_color", curve['color'])
+                    # Update style combo
+                    combo = tbl.cellWidget(row, 3)
+                    if combo:
+                        for i in range(combo.count()):
+                            if combo.itemData(i) == curve['linestyle']:
+                                combo.blockSignals(True)
+                                combo.setCurrentIndex(i)
+                                combo.blockSignals(False)
+                                break
+                    # Update width spin
+                    spin = tbl.cellWidget(row, 4)
+                    if spin:
+                        spin.blockSignals(True)
+                        spin.setValue(curve['linewidth'])
+                        spin.blockSignals(False)
+                    # Update legend name cell
+                    item = tbl.item(row, 1)
+                    if item:
+                        tbl.blockSignals(True)
+                        item.setText(curve['legend'])
+                        tbl.blockSignals(False)
+
+    def _save_settings(self):
+        _save_ui_settings({'print_pdf': self._settings_to_dict()})
+
+    def closeEvent(self, event):
+        self._save_settings()
+        super().closeEvent(event)
+
+    # ------------------------------------------------------------------ PDF export
+    def _save_pdf(self):
+        try:
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_pdf import PdfPages
+        except Exception as _mpl_err:
+            QtWidgets.QMessageBox.critical(
+                self, "Missing dependency",
+                f"matplotlib is required for PDF export.\n\nInstall with:\n  pip install matplotlib\n\n({type(_mpl_err).__name__}: {_mpl_err})"
+            )
+            return
+
+        last_pdf_dir = _load_ui_settings().get('last_pdf_dir', '')
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save PDF", last_pdf_dir, "PDF (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith('.pdf'):
+            path += '.pdf'
+
+        params = self._collect_render_params()
+        if not params['include_p1'] and not params['include_p2']:
+            QtWidgets.QMessageBox.warning(self, "Nothing to print", "No plots selected or no data.")
+            return
+
+        try:
+            fig = Figure(figsize=(self.spin_width.value(), self.spin_height.value()),
+                         dpi=self.spin_dpi.value())
+            self._render_to_figure(fig, params, downsample=1)
+            with PdfPages(path) as pdf:
+                pdf.savefig(fig, bbox_inches='tight', transparent=params['transparent'])
+            fig.clear()
+            _save_ui_settings({'last_pdf_dir': os.path.dirname(path)})
+            self._save_settings()
+            QtWidgets.QMessageBox.information(self, "Saved", f"PDF saved:\n{path}")
+        except Exception as exc:
+            import traceback
+            QtWidgets.QMessageBox.critical(
+                self, "Export failed",
+                f"Failed to generate PDF:\n{exc}\n\n{traceback.format_exc()[:1000]}"
+            )
 
 
 # ----------------------- Main Window -----------------------
@@ -4340,8 +5711,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._close_serial()
 
     def _connect_zoom_buttons(self):
-        self.zoomx_btn.clicked.connect(lambda: self._set_zoom_mode("x"))
-        self.zoomy_btn.clicked.connect(lambda: self._set_zoom_mode("y"))
+        self.zoomx_btn.clicked.connect(lambda checked: self._set_zoom_mode("x" if checked else "none"))
+        self.zoomy_btn.clicked.connect(lambda checked: self._set_zoom_mode("y" if checked else "none"))
         self.fit_btn.clicked.connect(self._zoom_fit)
 
     def _set_zoom_mode(self, mode):
@@ -4377,9 +5748,10 @@ class MainWindow(QtWidgets.QMainWindow):
             vb1.enableAutoRange(axis=pg.ViewBox.XYAxes)
             # Only enable y-axis auto-range for plot2 (x-axis is linked to plot1)
             vb2.enableAutoRange(axis=pg.ViewBox.YAxis)
-            # Re-enable both axes for normal zoom
             vb1.setMouseEnabled(x=True, y=True)
             vb2.setMouseEnabled(x=True, y=True)
+            vb1.setMouseMode(pg.ViewBox.PanMode)
+            vb2.setMouseMode(pg.ViewBox.PanMode)
 
     def _zoom_fit(self):
         self.zoomx_btn.setChecked(False)
@@ -4410,6 +5782,9 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_clear_all = QtWidgets.QPushButton("Clear plots")
         btn_clear_all.clicked.connect(self._clear_all_csvs)
         ctrl.addWidget(btn_clear_all)
+        btn_print_pdf = QtWidgets.QPushButton("Print to PDF…")
+        btn_print_pdf.clicked.connect(self._on_print_to_pdf)
+        ctrl.addWidget(btn_print_pdf)
         
         # CSV info display (list of loaded datasets with settings)
         self.csv_info_label = QtWidgets.QLabel("No CSV loaded")
@@ -4456,13 +5831,17 @@ class MainWindow(QtWidgets.QMainWindow):
         win1_label = QtWidgets.QLabel("Plot1 vars:")
         channel_selection_layout.addWidget(win1_label)
         self.combo_csv_plot1 = MultiSelectCombo()
+        self.combo_csv_plot1.setMinimumWidth(150)
+        self.combo_csv_plot1.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.combo_csv_plot1.checkedChanged.connect(self._on_csv_channels_changed)
         channel_selection_layout.addWidget(self.combo_csv_plot1)
-        
+
         # Window 2 channel selection with MultiSelectCombo
         win2_label = QtWidgets.QLabel("Plot2 vars:")
         channel_selection_layout.addWidget(win2_label)
         self.combo_csv_plot2 = MultiSelectCombo()
+        self.combo_csv_plot2.setMinimumWidth(150)
+        self.combo_csv_plot2.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.combo_csv_plot2.checkedChanged.connect(self._on_csv_channels_changed)
         channel_selection_layout.addWidget(self.combo_csv_plot2)
         
@@ -4492,13 +5871,27 @@ class MainWindow(QtWidgets.QMainWindow):
         for b in (self.graph_zoomx_btn, self.graph_zoomy_btn, self.graph_fit_btn):
             b.setCheckable(True)
             channel_selection_layout.addWidget(b)
-        # FFT buttons for Plot1 and Plot2
-        self.graph_fft_p1_btn = QtWidgets.QPushButton("FFT P1")
-        self.graph_fft_p2_btn = QtWidgets.QPushButton("FFT P2")
-        self.graph_fft_p1_btn.clicked.connect(self._on_fft_plot1)
-        self.graph_fft_p2_btn.clicked.connect(self._on_fft_plot2)
-        channel_selection_layout.addWidget(self.graph_fft_p1_btn)
-        channel_selection_layout.addWidget(self.graph_fft_p2_btn)
+        self.graph_pan_chk = QtWidgets.QCheckBox("Pan")
+        self.graph_pan_chk.setChecked(True)
+        self.graph_pan_chk.setToolTip("When checked, left-click always pans regardless of zoom buttons")
+        channel_selection_layout.addWidget(self.graph_pan_chk)
+        # FFT inline mode checkboxes
+        channel_selection_layout.addSpacing(6)
+        self.graph_fft_p1_chk = QtWidgets.QCheckBox("FFT P1")
+        self.graph_fft_p1_chk.setToolTip("Show FFT of Plot 1 variables")
+        self.graph_fft_p2_chk = QtWidgets.QCheckBox("FFT P2")
+        self.graph_fft_p2_chk.setToolTip("Show FFT of Plot 2 variables")
+        self.graph_fft_vis_chk = QtWidgets.QCheckBox("Vis. Win")
+        self.graph_fft_vis_chk.setToolTip("Compute FFT only on the visible time window")
+        self.graph_fft_log_chk = QtWidgets.QCheckBox("Log (dB)")
+        self.graph_fft_log_chk.setToolTip("Show FFT magnitude in dB (logarithmic scale)")
+        for _chk in (self.graph_fft_p1_chk, self.graph_fft_p2_chk,
+                     self.graph_fft_vis_chk, self.graph_fft_log_chk):
+            channel_selection_layout.addWidget(_chk)
+        self.graph_fft_p1_chk.toggled.connect(self._on_fft_p1_toggled)
+        self.graph_fft_p2_chk.toggled.connect(self._on_fft_p2_toggled)
+        self.graph_fft_vis_chk.toggled.connect(self._on_fft_options_changed)
+        self.graph_fft_log_chk.toggled.connect(self._on_fft_options_changed)
         # Cursors readout next to Fit View
         self.graph_cursor_info = QtWidgets.QLabel("C1: x=–, y=–    C2: x=–, y=–    Δx=–, Δy=–")
         self.graph_cursor_info.setVisible(False)
@@ -4524,41 +5917,72 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_csv_path = None
         self._cached_csv_data = None  # Cache CSV data to avoid re-reading
         self._cached_csv_path = None
+        self._csv_info_rows_by_id = {}  # ds_id -> QWidget row in csv_infos_layout
 
         self.two_plot = TwoWindowPlot()
         # Pass progress bar reference to plot widget
         self.two_plot._progress_bar = self.csv_loading_progress
-        self.graph_zoomx_btn.clicked.connect(
-            lambda: (self.graph_zoomy_btn.setChecked(False),
-                    self.two_plot.set_zoom_mode("x"))
-        )
-        self.graph_zoomy_btn.clicked.connect(
-            lambda: (self.graph_zoomx_btn.setChecked(False),
-                    self.two_plot.set_zoom_mode("y"))
-        )
-        self.graph_fit_btn.clicked.connect(
-            lambda: (self.graph_zoomx_btn.setChecked(False),
-                    self.graph_zoomy_btn.setChecked(False),
-                    self.two_plot.zoom_fit(),
-                    self.two_plot.set_zoom_mode("none"))
-        )
+        self.graph_zoomx_btn.clicked.connect(self._on_graph_zoomx_clicked)
+        self.graph_zoomy_btn.clicked.connect(self._on_graph_zoomy_clicked)
+        self.graph_fit_btn.clicked.connect(self._on_graph_fit_clicked)
+        self.graph_pan_chk.toggled.connect(self._on_graph_pan_toggled)
         # Wire cursor updates to label
         try:
             self.two_plot.cursorMoved.connect(self._update_cursor_info_label)
         except Exception:
             pass
+        # Refresh track dropdowns when curves change (e.g., async CSV load completes)
+        try:
+            self.two_plot.curvesUpdated.connect(self._populate_cursor_track_combos)
+        except Exception:
+            pass
+        # Sync FFT checkbox state after clear() resets _fft_enabled
+        try:
+            self.two_plot.curvesUpdated.connect(self._sync_fft_checkboxes)
+        except Exception:
+            pass
         v.addWidget(self.two_plot)
         self.tabs.addTab(w, "Graph")
+
+    def _on_graph_pan_toggled(self, checked: bool):
+        if checked:
+            self.graph_zoomx_btn.setChecked(False)
+            self.graph_zoomy_btn.setChecked(False)
+            self.two_plot.set_zoom_mode("none")
+
+    def _on_graph_zoomx_clicked(self, checked: bool):
+        if self.graph_pan_chk.isChecked():
+            self.graph_zoomx_btn.setChecked(False)
+            return
+        self.graph_zoomy_btn.setChecked(False)
+        self.two_plot.set_zoom_mode("x" if checked else "none")
+
+    def _on_graph_zoomy_clicked(self, checked: bool):
+        if self.graph_pan_chk.isChecked():
+            self.graph_zoomy_btn.setChecked(False)
+            return
+        self.graph_zoomx_btn.setChecked(False)
+        self.two_plot.set_zoom_mode("y" if checked else "none")
+
+    def _on_graph_fit_clicked(self):
+        self.graph_zoomx_btn.setChecked(False)
+        self.graph_zoomy_btn.setChecked(False)
+        self.two_plot.zoom_fit()
+        self.two_plot.set_zoom_mode("none")
 
     def _on_graph_cursors_toggled(self, checked: bool):
         try:
             self.two_plot.set_cursors_enabled(bool(checked))
         except Exception:
             pass
-        # Show/hide readout
-        self.graph_cursor_info.setVisible(bool(checked))
-        self.cursor_curve1_combo.setVisible(bool(checked))
-        self.cursor_curve2_combo.setVisible(bool(checked))
+        # Show/hide readout and dropdowns if either cursor set is enabled
+        try:
+            any_checked = bool(self.graph_cursors_chk.isChecked() or self.graph_cursors2_chk.isChecked())
+            self.graph_cursor_info.setVisible(any_checked)
+            self.cursor_curve1_combo.setVisible(any_checked)
+            self.cursor_curve2_combo.setVisible(any_checked)
+        except Exception:
+            pass
         if checked:
             try:
                 x1, y1, x2, y2, dx, dy = self.two_plot.get_cursor_values()
@@ -4569,6 +5993,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_graph_cursors2_toggled(self, checked: bool):
         try:
             self.two_plot.set_cursors2_enabled(bool(checked))
+        except Exception:
+            pass
+        # Show/hide readout and dropdowns if either cursor set is enabled
+        try:
+            any_checked = bool(self.graph_cursors_chk.isChecked() or self.graph_cursors2_chk.isChecked())
+            self.graph_cursor_info.setVisible(any_checked)
+            self.cursor_curve1_combo.setVisible(any_checked)
+            self.cursor_curve2_combo.setVisible(any_checked)
         except Exception:
             pass
 
@@ -4591,19 +6023,41 @@ class MainWindow(QtWidgets.QMainWindow):
                 y2_eval = self.two_plot.eval_curve_at_x(1, name1, x2)
         except Exception:
             pass
+        # Plot2 values: try tracking curve if selected, otherwise fall back to horizontal cursor values
         try:
             name2 = self.cursor_curve2_combo.currentText().strip()
-            if name2:
+        except Exception:
+            name2 = ""
+        if name2:
+            try:
                 y3 = self.two_plot.eval_curve_at_x(2, name2, x1)
                 y4 = self.two_plot.eval_curve_at_x(2, name2, x2)
-        except Exception:
-            pass
+            except Exception:
+                y3 = y4 = None
+        # Fallbacks
+        if y3 is None or y4 is None:
+            try:
+                y3_f, y4_f = self.two_plot.get_plot2_y_values()
+                if y3 is None:
+                    y3 = y3_f
+                if y4 is None:
+                    y4 = y4_f
+            except Exception:
+                pass
         # Fallbacks to horizontal values only if interpolation failed
         if y1_eval is None:
             y1_eval = y1
         if y2_eval is None:
             y2_eval = y2
         dy_eval = (y2_eval - y1_eval) if (y1_eval is not None and y2_eval is not None) else dy
+        # Move H cursors to track the selected curves
+        try:
+            self.two_plot.set_tracking_y(
+                y1=y1_eval, y2=y2_eval,
+                p2_y1=y3, p2_y2=y4
+            )
+        except Exception:
+            pass
         # Compose label
         if y3 is not None and y4 is not None:
             dy2 = y4 - y3
@@ -4665,7 +6119,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _pick_csv_into_graph(self):
         """Open file dialog with preview on single-click, load on double-click."""
-        dialog = QtWidgets.QFileDialog(self, "Pick CSV", DATA_DIR, "CSV (*.csv)")
+        start_dir = _load_ui_settings().get('last_csv_dir', DATA_DIR)
+        dialog = QtWidgets.QFileDialog(self, "Pick CSV", start_dir, "CSV (*.csv)")
         dialog.setFileMode(QtWidgets.QFileDialog.ExistingFile)
         
         # Track selected file for preview
@@ -4704,6 +6159,7 @@ class MainWindow(QtWidgets.QMainWindow):
             selected = dialog.selectedFiles()
             if selected:
                 path = selected[0]
+                _save_ui_settings({'last_csv_dir': os.path.dirname(path)})
                 self._load_csv_and_update_channels(path)
     
     def _format_settings_preview(self, csv_path: str, settings_dict: dict) -> str:
@@ -4816,8 +6272,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 prefixed = [f"1. {c}" for c in channel_cols]
                 self.combo_csv_plot1.set_items(prefixed)
                 self.combo_csv_plot2.set_items(prefixed)
+                # Auto-restore saved channel selections
+                saved = _load_ui_settings()
+                saved1 = saved.get('graph_plot1_vars', [])
+                saved2 = saved.get('graph_plot2_vars', [])
+                col_set = set(channel_cols)
+                want1 = [f"1. {n}" for n in saved1 if n in col_set]
+                want2 = [f"1. {n}" for n in saved2 if n in col_set]
+                _restored = False
+                if want1:
+                    self.combo_csv_plot1.set_checked_by_texts(want1, checked=True, preserve_others=False)
+                    _restored = True
+                if want2:
+                    self.combo_csv_plot2.set_checked_by_texts(want2, checked=True, preserve_others=False)
+                    _restored = True
                 # Show selection row
                 self.channel_selection_container.setVisible(True)
+                if _restored:
+                    QtCore.QTimer.singleShot(0, self._on_csv_channels_changed)
                 # Append info line for dataset 1
                 self._append_csv_info_line(1, path, settings_dict, monitor_extras)
                 # Minimize duplicate preview on the top label after loading
@@ -5086,7 +6558,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.csv_info_label.setStyleSheet("")  # Use default/natural text color
 
     def _append_csv_info_line(self, ds_id: int, csv_path: str, settings_dict: dict, monitor_extras: dict | None = None):
-        """Append a line describing a loaded CSV under the top bar."""
+        """Append a row describing a loaded CSV under the top bar, with an X close button."""
         try:
             filename = os.path.basename(csv_path)
         except Exception:
@@ -5115,9 +6587,25 @@ class MainWindow(QtWidgets.QMainWindow):
             if vd is not None:
                 parts.append(f"Vdc={_fmt4(vd)}")
         text = " | ".join(str(p) for p in parts if p is not None and str(p) != "")
+
+        row = QtWidgets.QWidget()
+        row_layout = QtWidgets.QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
         lbl = QtWidgets.QLabel(text)
-        self.csv_infos_layout.addWidget(lbl)
-        return lbl
+        row_layout.addWidget(lbl)
+        btn_x = QtWidgets.QPushButton("✕")
+        btn_x.setFixedSize(18, 18)
+        btn_x.setToolTip(f"Close dataset {ds_id}")
+        btn_x.setStyleSheet("QPushButton { border: none; color: #888; font-size: 11px; }"
+                            "QPushButton:hover { color: #cc3333; }")
+        btn_x.clicked.connect(lambda _checked, did=ds_id: self._close_dataset(did))
+        row_layout.addWidget(btn_x)
+        row_layout.addStretch()
+
+        self.csv_infos_layout.addWidget(row)
+        self._csv_info_rows_by_id[ds_id] = row
+        return row
 
     def _on_csv_channels_changed(self):
         """Called when channel selection changes in CSV plot combos."""
@@ -5131,6 +6619,27 @@ class MainWindow(QtWidgets.QMainWindow):
         # Refresh overlays for datasets >= 2 according to current selections
         try:
             self._refresh_overlays_from_selection()
+        except Exception:
+            pass
+        # Persist current selection (bare names, no dataset prefix)
+        try:
+            def _bare(items):
+                out = []
+                for t in items:
+                    s = str(t)
+                    if "." in s[:4]:
+                        try:
+                            _, name = s.split(".", 1)
+                            out.append(name.strip())
+                        except Exception:
+                            out.append(s)
+                    else:
+                        out.append(s)
+                return out
+            _save_ui_settings({
+                'graph_plot1_vars': _bare(self.combo_csv_plot1.checked_items()),
+                'graph_plot2_vars': _bare(self.combo_csv_plot2.checked_items()),
+            })
         except Exception:
             pass
 
@@ -5226,12 +6735,41 @@ class MainWindow(QtWidgets.QMainWindow):
                     print(f"DEBUG: reparsed settings -> ts_div={ts_div}, fs_trq={fs_trq}")
             except Exception as _reparse_err:
                 print(f"DEBUG: reparse failed: {_reparse_err}")
-        if ts_div is not None and ts_div > 0 and fs_trq is not None and fs_trq > 0:
+        if ts_div is None:
+            ts_div = 1.0  # not in CSV → every sample was logged (divisor = 1)
+        if ts_div > 0 and fs_trq is not None and fs_trq > 0:
             sec_per_sample = ts_div / (fs_trq * 1000.0)
             self.two_plot.set_time_scale(sec_per_sample)
         else:
-            # Fallback to samples
-            self.two_plot.set_time_scale(1.0)
+            # Fs_trq missing — ask user for sampling time
+            raw_text, ok = QtWidgets.QInputDialog.getText(
+                self,
+                "Sampling Time Unknown",
+                "Neither Fs_trq nor data_logger_ts_div was found in the CSV.\n"
+                "Enter the sampling time per sample (seconds).\n"
+                "Accepts decimals (0.000125), fractions (1/16000), or sci notation (62.5e-6):",
+                QtWidgets.QLineEdit.Normal,
+                "1.0",
+            )
+            user_sec = 1.0
+            if ok and raw_text.strip():
+                try:
+                    # Support fractions like 1/16000
+                    if '/' in raw_text:
+                        num_s, den_s = raw_text.split('/', 1)
+                        user_sec = float(num_s.strip()) / float(den_s.strip())
+                    else:
+                        user_sec = float(raw_text.strip())
+                    if user_sec <= 0:
+                        raise ValueError("must be positive")
+                except Exception:
+                    QtWidgets.QMessageBox.warning(
+                        self, "Invalid Input",
+                        f"Could not parse '{raw_text}' as a sampling time.\n"
+                        "Falling back to 1 sample = 1 unit."
+                    )
+                    user_sec = 1.0
+            self.two_plot.set_time_scale(user_sec)
         try:
             self.two_plot.plot_csv(path, g1, g2, t1, t2, linkx, downsample_factor)
             self._set_status(f"Opened: {os.path.basename(path)} ✅")
@@ -5273,6 +6811,10 @@ class MainWindow(QtWidgets.QMainWindow):
             elif names1:
                 self.cursor_curve1_combo.setCurrentIndex(0)
             self.cursor_curve1_combo.blockSignals(False)
+            try:
+                self.cursor_curve1_combo.setEnabled(bool(names1))
+            except Exception:
+                pass
         if hasattr(self, "cursor_curve2_combo"):
             self.cursor_curve2_combo.blockSignals(True)
             self.cursor_curve2_combo.clear()
@@ -5282,26 +6824,51 @@ class MainWindow(QtWidgets.QMainWindow):
             elif names2:
                 self.cursor_curve2_combo.setCurrentIndex(0)
             self.cursor_curve2_combo.blockSignals(False)
+            try:
+                self.cursor_curve2_combo.setEnabled(bool(names2))
+            except Exception:
+                pass
         # Refresh label with new selection
         self._refresh_cursor_readout()
 
-    def _on_fft_plot1(self):
-        try:
-            self._do_fft_for_plot(1)
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "FFT", f"Failed to compute FFT for Plot1:\n{e}")
+    def _on_fft_p1_toggled(self, checked: bool):
+        self.two_plot.set_fft_mode(
+            1, checked,
+            use_visible=self.graph_fft_vis_chk.isChecked(),
+            log_scale=self.graph_fft_log_chk.isChecked(),
+        )
 
-    def _on_fft_plot2(self):
-        try:
-            self._do_fft_for_plot(2)
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "FFT", f"Failed to compute FFT for Plot2:\n{e}")
+    def _on_fft_p2_toggled(self, checked: bool):
+        self.two_plot.set_fft_mode(
+            2, checked,
+            use_visible=self.graph_fft_vis_chk.isChecked(),
+            log_scale=self.graph_fft_log_chk.isChecked(),
+        )
+
+    def _on_fft_options_changed(self):
+        for win_id, chk in ((1, self.graph_fft_p1_chk), (2, self.graph_fft_p2_chk)):
+            if chk.isChecked():
+                self.two_plot.set_fft_mode(
+                    win_id, True,
+                    use_visible=self.graph_fft_vis_chk.isChecked(),
+                    log_scale=self.graph_fft_log_chk.isChecked(),
+                )
+
+    def _sync_fft_checkboxes(self):
+        """Uncheck FFT boxes when the plot backend resets fft_enabled (e.g. after clear())."""
+        for win_id, chk in ((1, self.graph_fft_p1_chk), (2, self.graph_fft_p2_chk)):
+            if chk.isChecked() and not self.two_plot._fft_enabled.get(win_id):
+                chk.blockSignals(True)
+                chk.setChecked(False)
+                chk.blockSignals(False)
 
     def _add_csv_overlay(self):
         """Pick a CSV and overlay selected channels from current combos onto plots."""
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Add CSV (overlay)", DATA_DIR, "CSV (*.csv)")
+        start_dir = _load_ui_settings().get('last_csv_dir', DATA_DIR)
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Add CSV (overlay)", start_dir, "CSV (*.csv)")
         if not path:
             return
+        _save_ui_settings({'last_csv_dir': os.path.dirname(path)})
         try:
             import pandas as pd
             import os
@@ -5411,6 +6978,10 @@ class MainWindow(QtWidgets.QMainWindow):
             label = f"{ds_id}: {os.path.basename(path)}"
             self.two_plot.add_overlay_curves(win1_data, win2_data, label)
             self._set_status(f"Overlay added: {label}")
+            try:
+                self.two_plot.refit_limits_to_all_data()
+            except Exception:
+                pass
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Overlay", f"Failed to add overlay:\n{e}")
 
@@ -5449,12 +7020,68 @@ class MainWindow(QtWidgets.QMainWindow):
                     w = item.widget()
                     if w is not None:
                         w.deleteLater()
+            self._csv_info_rows_by_id = {}
             if hasattr(self, "csv_info_label"):
                 self.csv_info_label.setText("No CSV loaded")
                 self.csv_info_label.setStyleSheet("color: #666; font-style: italic;")
             self._set_status("Cleared plots and datasets.")
         except Exception:
             pass
+
+    def _close_dataset(self, ds_id: int):
+        """Remove a specific dataset, its info row, combo items, and curves."""
+        try:
+            # Remove from registries
+            self.dataset_paths_by_id.pop(ds_id, None)
+            self.dataset_labels_by_id.pop(ds_id, None)
+            self.dataset_channels_by_id.pop(ds_id, None)
+            self.dataset_settings_by_id.pop(ds_id, None)
+            # Remove info row widget
+            row_widget = self._csv_info_rows_by_id.pop(ds_id, None)
+            if row_widget is not None:
+                self.csv_infos_layout.removeWidget(row_widget)
+                row_widget.deleteLater()
+            # Remove combo items for this dataset
+            prefix = f"{ds_id}. "
+            self.combo_csv_plot1.remove_items_by_prefix(prefix)
+            self.combo_csv_plot2.remove_items_by_prefix(prefix)
+            # Recompute dataset_count from remaining keys
+            remaining = self.dataset_paths_by_id.keys()
+            self.dataset_count = max(remaining, default=0)
+            if not remaining:
+                # No datasets left — full reset
+                self.current_csv_path = None
+                self.available_channels = []
+                if hasattr(self, "two_plot") and self.two_plot:
+                    try:
+                        self.two_plot.clear()
+                    except Exception:
+                        pass
+                if hasattr(self, "channel_selection_container"):
+                    self.channel_selection_container.setVisible(False)
+                if hasattr(self, "csv_info_label"):
+                    self.csv_info_label.setText("No CSV loaded")
+                    self.csv_info_label.setStyleSheet("color: #666; font-style: italic;")
+            else:
+                if ds_id == 1:
+                    self.current_csv_path = None
+                    # Clear base curves then re-add overlays
+                    if hasattr(self, "two_plot") and self.two_plot:
+                        try:
+                            self.two_plot.clear()
+                        except Exception:
+                            pass
+                    self._refresh_overlays_from_selection()
+                else:
+                    self._refresh_overlays_from_selection()
+                try:
+                    self._populate_cursor_track_combos()
+                except Exception:
+                    pass
+            self._set_status(f"Dataset {ds_id} closed.")
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
     def _refresh_overlays_from_selection(self):
         """Rebuild overlay curves for all datasets >= 2 based on current selections."""
@@ -5557,6 +7184,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     win2_data[c] = (x, y)
             label = f"{ds_id}: {self.dataset_labels_by_id.get(ds_id, '')}"
             self.two_plot.add_overlay_curves(win1_data, win2_data, label)
+        # Rescale after overlays are rebuilt
+        try:
+            self.two_plot.refit_limits_to_all_data()
+        except Exception:
+            pass
 
     def _do_fft_for_plot(self, win_id: int):
         # Gather all currently displayed curves for this plot window (base + overlays)
@@ -5959,6 +7591,22 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg.show()
         self._fft_windows.append(dlg)
 
+
+    # ---------------- Print to PDF ----------------
+    def _on_print_to_pdf(self):
+        """Open the Print-to-PDF dialog for the current graph."""
+        has_data = any(
+            curve.xData is not None and len(curve.xData) > 0
+            for curve in self.two_plot._curves.values()
+        )
+        if not has_data:
+            QtWidgets.QMessageBox.information(
+                self, "Print to PDF",
+                "No data to print.\nLoad a CSV and select channels first."
+            )
+            return
+        dlg = PrintPlotDialog(self.two_plot, self)
+        dlg.exec()
 
     # ---------------- Logging (shared port) ----------------
     def _toggle_logging(self):

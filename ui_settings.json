@@ -1,0 +1,70 @@
+{
+  "last_csv_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/source_code/gui/data_org/grouped/induction/foc/fs_trq=6__fswitching=3__sensored=enabled__spdc=0.02__cc=0.003",
+  "print_pdf": {
+    "title1": "",
+    "title2": "",
+    "xlabel": "t (ms)",
+    "ylabel1": "Current (A), dq",
+    "ylabel2": "FFT Amplitude (dB)",
+    "use_visible": true,
+    "fig_width": 12.0,
+    "fig_height": 8.0,
+    "dpi": 300,
+    "transparent": true,
+    "grid": true,
+    "minor_grid": false,
+    "grid_alpha": 0.5,
+    "legend": true,
+    "legend_pos": "upper right",
+    "fs_title": 12,
+    "fs_label": 12,
+    "fs_tick": 12,
+    "fs_legend": 12,
+    "relative_time": false,
+    "time_unit": "ms",
+    "curve_overrides": {
+      "dtc_trq_actual": {
+        "color": "#4daf4a",
+        "linewidth": 1.5,
+        "linestyle": "-",
+        "legend": "dtc_trq_actual"
+      },
+      "dtc_trq_ref": {
+        "color": "#984ea3",
+        "linewidth": 1.5,
+        "linestyle": "-",
+        "legend": "dtc_trq_ref"
+      },
+      "dtc_psi_actual": {
+        "color": "#1e90ff",
+        "linewidth": 1.5,
+        "linestyle": "-",
+        "legend": "dtc_psi_actual"
+      },
+      "dtc_psi_ref": {
+        "color": "#ff1493",
+        "linewidth": 1.5,
+        "linestyle": "-",
+        "legend": "dtc_psi_ref"
+      }
+    },
+    "cursor_p1_show_c1": false,
+    "cursor_p1_show_c2": false,
+    "cursor_p1_show_arrow": false,
+    "cursor_p1_show_y": false,
+    "cursor_p2_show_c1": false,
+    "cursor_p2_show_c2": false,
+    "cursor_p2_show_arrow": false,
+    "cursor_p2_show_y": false
+  },
+  "graph_plot1_vars": [
+    "Id_ref",
+    "Iq_ref",
+    "Id",
+    "Iq"
+  ],
+  "graph_plot2_vars": [
+    "motor_rpm"
+  ],
+  "last_pdf_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap5_sim_exp/ind/foc/tb"
+}
