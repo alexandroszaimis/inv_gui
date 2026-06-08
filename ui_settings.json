@@ -1,14 +1,14 @@
 {
-  "last_csv_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/source_code/gui/data_org/grouped/induction/foc/fs_trq=6__fswitching=3__sensored=enabled__spdc=0.02__cc=0.003",
+  "last_csv_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap5_sim_exp/ind/dtc",
   "print_pdf": {
     "title1": "",
     "title2": "",
-    "xlabel": "t (ms)",
-    "ylabel1": "Current (A), dq",
-    "ylabel2": "FFT Amplitude (dB)",
+    "xlabel": "",
+    "ylabel1": "Stator Flux (Wb)",
+    "ylabel2": "Torque (Nm)",
     "use_visible": true,
     "fig_width": 12.0,
-    "fig_height": 8.0,
+    "fig_height": 4.0,
     "dpi": 300,
     "transparent": true,
     "grid": true,
@@ -21,31 +21,43 @@
     "fs_tick": 12,
     "fs_legend": 12,
     "relative_time": false,
-    "time_unit": "ms",
+    "time_unit": "s",
     "curve_overrides": {
-      "dtc_trq_actual": {
-        "color": "#4daf4a",
-        "linewidth": 1.5,
+      "psi_actual": {
+        "color": "#00ced1",
+        "linewidth": 1.0,
         "linestyle": "-",
-        "legend": "dtc_trq_actual"
+        "legend": "\u03c8s_actual"
       },
-      "dtc_trq_ref": {
-        "color": "#984ea3",
-        "linewidth": 1.5,
+      "psi_calc": {
+        "color": "#ff00ff",
+        "linewidth": 1.0,
         "linestyle": "-",
-        "legend": "dtc_trq_ref"
+        "legend": "\u03c8s_calc"
       },
-      "dtc_psi_actual": {
-        "color": "#1e90ff",
-        "linewidth": 1.5,
+      "psi_ref": {
+        "color": "#e41a1c",
+        "linewidth": 1.0,
         "linestyle": "-",
-        "legend": "dtc_psi_actual"
+        "legend": "\u03c8s_ref"
       },
-      "dtc_psi_ref": {
-        "color": "#ff1493",
-        "linewidth": 1.5,
+      "trq_actual": {
+        "color": "#ff4500",
+        "linewidth": 1.0,
         "linestyle": "-",
-        "legend": "dtc_psi_ref"
+        "legend": "trq_actual"
+      },
+      "trq_calc": {
+        "color": "#ffd700",
+        "linewidth": 1.0,
+        "linestyle": "-",
+        "legend": "trq_calc"
+      },
+      "trq_ref": {
+        "color": "#7fff00",
+        "linewidth": 1.0,
+        "linestyle": "-",
+        "legend": "trq_ref"
       }
     },
     "cursor_p1_show_c1": false,
@@ -58,13 +70,14 @@
     "cursor_p2_show_y": false
   },
   "graph_plot1_vars": [
-    "Id_ref",
-    "Iq_ref",
-    "Id",
-    "Iq"
+    "psi_ref",
+    "psi_calc",
+    "psi_actual"
   ],
   "graph_plot2_vars": [
-    "motor_rpm"
+    "trq_ref",
+    "trq_calc",
+    "trq_actual"
   ],
-  "last_pdf_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap5_sim_exp/ind/foc/tb"
+  "last_pdf_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap5_sim_exp/ind/dtc/plecs"
 }

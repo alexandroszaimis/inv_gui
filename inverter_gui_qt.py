@@ -5915,6 +5915,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_selection_container = channel_selection_container
         self.available_channels = []  # Will be populated when CSV is loaded
         self.current_csv_path = None
+        self.current_csv_manual_sample_time = None  # User-entered sample time when not in CSV
         self._cached_csv_data = None  # Cache CSV data to avoid re-reading
         self._cached_csv_path = None
         self._csv_info_rows_by_id = {}  # ds_id -> QWidget row in csv_infos_layout
@@ -6255,6 +6256,44 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.dataset_paths_by_id[1] = path
                 self.available_channels = channel_cols
                 self.current_csv_path = path
+                # Check if sample time can be derived from CSV; if not, ask once now
+                self.current_csv_manual_sample_time = None
+                def _sf(v):
+                    try:
+                        s = str(v).strip()
+                        return float(s) if s and s.lower() != "nan" else None
+                    except Exception:
+                        return None
+                _ts_div = _sf(settings_dict.get("data_logger_ts_div"))
+                _fs_trq = _sf(settings_dict.get("Fs_trq"))
+                if not (_ts_div and _ts_div > 0 and _fs_trq and _fs_trq > 0):
+                    _raw, _ok = QtWidgets.QInputDialog.getText(
+                        self,
+                        "Sampling Time Unknown",
+                        "Neither Fs_trq nor data_logger_ts_div was found in the CSV.\n"
+                        "Enter the sampling time per sample (seconds).\n"
+                        "Accepts decimals (0.000125), fractions (1/16000), or sci notation (62.5e-6):",
+                        QtWidgets.QLineEdit.Normal,
+                        "1.0",
+                    )
+                    _user_sec = 1.0
+                    if _ok and _raw.strip():
+                        try:
+                            if '/' in _raw:
+                                _n, _d = _raw.split('/', 1)
+                                _user_sec = float(_n.strip()) / float(_d.strip())
+                            else:
+                                _user_sec = float(_raw.strip())
+                            if _user_sec <= 0:
+                                raise ValueError("must be positive")
+                        except Exception:
+                            QtWidgets.QMessageBox.warning(
+                                self, "Invalid Input",
+                                f"Could not parse '{_raw}' as a sampling time.\n"
+                                "Falling back to 1 sample = 1 unit."
+                            )
+                            _user_sec = 1.0
+                    self.current_csv_manual_sample_time = _user_sec
                 # Initialize/clear caches
                 if hasattr(self, 'two_plot') and self.two_plot:
                     self.two_plot._cached_csv_data = None
@@ -6741,34 +6780,8 @@ class MainWindow(QtWidgets.QMainWindow):
             sec_per_sample = ts_div / (fs_trq * 1000.0)
             self.two_plot.set_time_scale(sec_per_sample)
         else:
-            # Fs_trq missing — ask user for sampling time
-            raw_text, ok = QtWidgets.QInputDialog.getText(
-                self,
-                "Sampling Time Unknown",
-                "Neither Fs_trq nor data_logger_ts_div was found in the CSV.\n"
-                "Enter the sampling time per sample (seconds).\n"
-                "Accepts decimals (0.000125), fractions (1/16000), or sci notation (62.5e-6):",
-                QtWidgets.QLineEdit.Normal,
-                "1.0",
-            )
-            user_sec = 1.0
-            if ok and raw_text.strip():
-                try:
-                    # Support fractions like 1/16000
-                    if '/' in raw_text:
-                        num_s, den_s = raw_text.split('/', 1)
-                        user_sec = float(num_s.strip()) / float(den_s.strip())
-                    else:
-                        user_sec = float(raw_text.strip())
-                    if user_sec <= 0:
-                        raise ValueError("must be positive")
-                except Exception:
-                    QtWidgets.QMessageBox.warning(
-                        self, "Invalid Input",
-                        f"Could not parse '{raw_text}' as a sampling time.\n"
-                        "Falling back to 1 sample = 1 unit."
-                    )
-                    user_sec = 1.0
+            # Fs_trq missing — use the sample time entered when the file was opened
+            user_sec = getattr(self, "current_csv_manual_sample_time", None) or 1.0
             self.two_plot.set_time_scale(user_sec)
         try:
             self.two_plot.plot_csv(path, g1, g2, t1, t2, linkx, downsample_factor)
@@ -6994,6 +7007,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.dataset_paths_by_id = {}
             self.dataset_settings_by_id = {}
             self.current_csv_path = None
+            self.current_csv_manual_sample_time = None
             self.available_channels = []
             # Clear plot widgets
             if hasattr(self, "two_plot") and self.two_plot:
