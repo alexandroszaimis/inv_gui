@@ -1,5 +1,5 @@
 {
-  "last_csv_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap5_sim_exp/ind/dtc",
+  "last_csv_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/source_code/gui/v5/data/19_06_2026",
   "print_pdf": {
     "title1": "",
     "title2": "",
@@ -23,41 +23,29 @@
     "relative_time": false,
     "time_unit": "s",
     "curve_overrides": {
-      "psi_actual": {
-        "color": "#00ced1",
-        "linewidth": 1.0,
-        "linestyle": "-",
-        "legend": "\u03c8s_actual"
-      },
-      "psi_calc": {
-        "color": "#ff00ff",
-        "linewidth": 1.0,
-        "linestyle": "-",
-        "legend": "\u03c8s_calc"
-      },
-      "psi_ref": {
-        "color": "#e41a1c",
-        "linewidth": 1.0,
-        "linestyle": "-",
-        "legend": "\u03c8s_ref"
-      },
-      "trq_actual": {
-        "color": "#ff4500",
-        "linewidth": 1.0,
-        "linestyle": "-",
-        "legend": "trq_actual"
-      },
-      "trq_calc": {
+      "CH1A": {
         "color": "#ffd700",
-        "linewidth": 1.0,
+        "linewidth": 1.5,
         "linestyle": "-",
-        "legend": "trq_calc"
+        "legend": "CH1A"
       },
-      "trq_ref": {
-        "color": "#7fff00",
-        "linewidth": 1.0,
+      "CH4A": {
+        "color": "#ff4500",
+        "linewidth": 1.5,
         "linestyle": "-",
-        "legend": "trq_ref"
+        "legend": "CH4A"
+      },
+      "CH3A": {
+        "color": "#7fff00",
+        "linewidth": 1.5,
+        "linestyle": "-",
+        "legend": "CH3A"
+      },
+      "CH2A": {
+        "color": "#00ced1",
+        "linewidth": 1.5,
+        "linestyle": "-",
+        "legend": "CH2A"
       }
     },
     "cursor_p1_show_c1": false,
@@ -70,14 +58,20 @@
     "cursor_p2_show_y": false
   },
   "graph_plot1_vars": [
-    "psi_ref",
-    "psi_calc",
-    "psi_actual"
+    "Vsingle",
+    "V2",
+    "V3"
   ],
   "graph_plot2_vars": [
-    "trq_ref",
-    "trq_calc",
-    "trq_actual"
+    "I2"
   ],
-  "last_pdf_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap5_sim_exp/ind/dtc/plecs"
+  "last_pdf_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap5_sim_exp/ind/dtc/plecs",
+  "rt_plot_vars": {
+    "plot1": [
+      "I2"
+    ],
+    "plot2": [
+      "igbt_temp"
+    ]
+  }
 }

@@ -207,7 +207,7 @@ def is_array_field(name):
     return '[' in name and ']' in name
 
 # Enums
-ENUM_MOTOR_TYPE = {0: "PMSM", 1: "INDUCTION"}
+ENUM_MOTOR_TYPE = {0: "PMSM", 1: "INDUCTION", 2: "VOLTAGE_SOURCE"}
 ENUM_SENSOR     = {0: "none", 1: "resolver", 2: "abs_encoder", 3: "inc_encoder"}
 ENUM_CONN       = {0: "DELTA", 1: "STAR"}
 ENUM_ZERO_SEQ   = {0: "NONE", 1: "3RD_HARMONIC_INJ", 2: "MIN_MAX_INJ"}
@@ -290,6 +290,11 @@ LOG_TABLE_VARIABLES = [
     ("adc_vref", "f32"),
     ("offset_buf", "i16"),
     ("offset_buf_idx", "u16"),
+    ("igbt_temp", "f32"),
+    ("vce1", "f32"),
+    ("vce2", "f32"),
+    ("vce3", "f32"),
+    ("Vsingle", "f32")
 ]
 
 # DIAG fields (name, type). Keep aligned with firmware order.
@@ -5449,7 +5454,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pv = QtWidgets.QHBoxLayout()
         self.periodic_chk = QtWidgets.QCheckBox("Start periodic send(50ms)")
         self.periodic_chk.toggled.connect(self._on_periodic_toggled)
-        self.period_ms = QtWidgets.QSpinBox(); self.period_ms.setRange(10, 10000)
+        self.period_ms = QtWidgets.QSpinBox(); self.period_ms.setRange(1, 10000)
         self.period_ms.setValue(100); self.period_ms.valueChanged.connect(self._on_period_changed)
 
         self.monreq_chk = QtWidgets.QCheckBox("Monitor data request")   # NEW
@@ -5587,13 +5592,29 @@ class MainWindow(QtWidgets.QMainWindow):
         all_names = [n for (n, _t) in DIAG_FIELDS]
         self.combo_plot1 = MultiSelectCombo(all_names)
         self.combo_plot2 = MultiSelectCombo(all_names)
-        # sensible defaults
+        # sensible defaults (overridden below if a saved selection exists)
         for want in ["Id_ref","Iq_ref","Id_filt","Iq_filt"]:
             if want in all_names:
                 self.combo_plot1.model().item(all_names.index(want)).setCheckState(QtCore.Qt.Checked)
         for want in ["motor_rpm"]:
             if want in all_names:
                 self.combo_plot2.model().item(all_names.index(want)).setCheckState(QtCore.Qt.Checked)
+
+        # Restore previously saved plot-var selections (takes priority over defaults)
+        _saved_rt = _load_ui_settings().get('rt_plot_vars', {})
+        if _saved_rt.get('plot1'):
+            self.combo_plot1.set_checked_by_texts(_saved_rt['plot1'], preserve_others=False)
+        if _saved_rt.get('plot2'):
+            self.combo_plot2.set_checked_by_texts(_saved_rt['plot2'], preserve_others=False)
+
+        # Persist whenever the user changes the selection
+        def _save_rt_plot_vars():
+            _save_ui_settings({'rt_plot_vars': {
+                'plot1': self.combo_plot1.checked_items(),
+                'plot2': self.combo_plot2.checked_items(),
+            }})
+        self.combo_plot1.checkedChanged.connect(_save_rt_plot_vars)
+        self.combo_plot2.checkedChanged.connect(_save_rt_plot_vars)
 
         selh = QtWidgets.QHBoxLayout()
         selh.addWidget(QtWidgets.QLabel("Plot1 vars:")); selh.addWidget(self.combo_plot1)
