@@ -3510,6 +3510,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Inverter GUI — PySide6")
+        # Capture OS default font size before any scaling so _apply_ui_scale always
+        # scales relative to the system default regardless of call order.
+        _pt = QtWidgets.QApplication.instance().font().pointSize()
+        self._base_font_pt = _pt if _pt > 0 else 9
+        self._ui_scale = 1.0
         self.resize(1400, 900)
         # Registry for graph CSV datasets (1 = primary, 2+ = overlays)
         self.dataset_count = 0
@@ -3608,6 +3613,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._build_menus()
         self._apply_theme("inherited")
+
+        # Restore saved UI scale (must come after _build_menus so _scale_actions exists)
+        _saved_scale = _load_ui_settings().get('ui_scale', 1.0)
+        if abs(_saved_scale - 1.0) > 0.005:
+            self._apply_ui_scale(_saved_scale)
 
         # === single QTimer for periodic control ===
         self.periodic_timer = QtCore.QTimer(self)
@@ -5081,6 +5091,33 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._theme_group.triggered.connect(self._on_theme_changed)
 
+        opt_menu.addSeparator()
+
+        # --- UI Scale submenu ---
+        scale_menu = QtWidgets.QMenu("UI Scale", self)
+        opt_menu.addMenu(scale_menu)
+
+        self._scale_group = QtGui.QActionGroup(self)
+        self._scale_group.setExclusive(True)
+        self._scale_actions = {}
+
+        for pct in [60, 80, 100, 125, 150, 175, 200]:
+            factor = pct / 100.0
+            act = QtGui.QAction(f"{pct}%", self, checkable=True)
+            act.setData(factor)
+            scale_menu.addAction(act)
+            self._scale_group.addAction(act)
+            self._scale_actions[factor] = act
+            if pct == 100:
+                act.setChecked(True)
+
+        scale_menu.addSeparator()
+        self._act_scale_custom = QtGui.QAction("Custom…", self)
+        scale_menu.addAction(self._act_scale_custom)
+        self._act_scale_custom.triggered.connect(self._on_scale_custom)
+
+        self._scale_group.triggered.connect(self._on_scale_preset)
+
         # attach to the gear button
         if hasattr(self, "options_btn") and self.options_btn is not None:
             self.options_btn.setMenu(opt_menu)
@@ -5109,6 +5146,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_highlight_text_style()
         if hasattr(self, "_apply_plot_theme"):
             self._apply_plot_theme()
+
+    def _on_scale_preset(self, action: QtGui.QAction):
+        self._apply_ui_scale(action.data())
+
+    def _on_scale_custom(self):
+        val, ok = QtWidgets.QInputDialog.getDouble(
+            self, "Custom UI Scale", "Scale (%):",
+            round(self._ui_scale * 100), 40.0, 300.0, 0,
+        )
+        if ok:
+            self._apply_ui_scale(val / 100.0)
+
+    def _apply_ui_scale(self, factor: float):
+        app = QtWidgets.QApplication.instance()
+        new_pt = max(6, round(self._base_font_pt * factor))
+        font = app.font()
+        font.setPointSize(new_pt)
+        app.setFont(font)
+        self._ui_scale = factor
+        # Sync checkmarks: check exact preset, clear all for custom values
+        for f, act in self._scale_actions.items():
+            act.setChecked(abs(f - factor) < 0.005)
+        _save_ui_settings({'ui_scale': factor})
 
     def _apply_plot_theme(self):
         """Safely synchronize pyqtgraph plots with the current theme."""
@@ -5913,10 +5973,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.graph_fft_p2_chk.toggled.connect(self._on_fft_p2_toggled)
         self.graph_fft_vis_chk.toggled.connect(self._on_fft_options_changed)
         self.graph_fft_log_chk.toggled.connect(self._on_fft_options_changed)
-        # Cursors readout next to Fit View
-        self.graph_cursor_info = QtWidgets.QLabel("C1: x=–, y=–    C2: x=–, y=–    Δx=–, Δy=–")
-        self.graph_cursor_info.setVisible(False)
-        channel_selection_layout.addWidget(self.graph_cursor_info)
+        # Cursors readout — two stacked rows so values don't overflow horizontally
+        _cur_container = QtWidgets.QWidget()
+        _cur_vbox = QtWidgets.QVBoxLayout(_cur_container)
+        _cur_vbox.setContentsMargins(0, 0, 0, 0)
+        _cur_vbox.setSpacing(1)
+        self.graph_cursor_info_row1 = QtWidgets.QLabel("C1: x=–, y=–    C2: x=–, y=–")
+        self.graph_cursor_info_row2 = QtWidgets.QLabel("Δx=–, Δy=–")
+        _cur_vbox.addWidget(self.graph_cursor_info_row1)
+        _cur_vbox.addWidget(self.graph_cursor_info_row2)
+        _cur_container.setVisible(False)
+        channel_selection_layout.addWidget(_cur_container)
+        # Keep self.graph_cursor_info pointing to the container for .setVisible() callers
+        self.graph_cursor_info = _cur_container
         
         # Loading progress bar (initially hidden)
         self.csv_loading_progress = QtWidgets.QProgressBar()
@@ -6080,13 +6149,15 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         except Exception:
             pass
-        # Compose label
+        # Compose label — row1: cursor positions, row2: deltas / P2 values
+        row1 = f"C1: x={fmt(x1)}, y={fmt(y1_eval)}    C2: x={fmt(x2)}, y={fmt(y2_eval)}"
         if y3 is not None and y4 is not None:
             dy2 = y4 - y3
-            text = f"C1: x={fmt(x1)}, y={fmt(y1_eval)}    C2: x={fmt(x2)}, y={fmt(y2_eval)}    P2: y3={fmt(y3)}, y4={fmt(y4)}, Δy2={fmt(dy2)}    Δx={fmt(dx)}, Δy={fmt(dy_eval)}"
+            row2 = f"P2: y3={fmt(y3)}, y4={fmt(y4)}, Δy2={fmt(dy2)}    Δx={fmt(dx)}, Δy={fmt(dy_eval)}"
         else:
-            text = f"C1: x={fmt(x1)}, y={fmt(y1_eval)}    C2: x={fmt(x2)}, y={fmt(y2_eval)}    Δx={fmt(dx)}, Δy={fmt(dy_eval)}"
-        self.graph_cursor_info.setText(text)
+            row2 = f"Δx={fmt(dx)}, Δy={fmt(dy_eval)}"
+        self.graph_cursor_info_row1.setText(row1)
+        self.graph_cursor_info_row2.setText(row2)
 
     def _refresh_cursor_readout(self):
         try:

@@ -73,5 +73,6 @@
     "plot2": [
       "igbt_temp"
     ]
-  }
+  },
+  "ui_scale": 0.9
 }
