@@ -1,51 +1,50 @@
 {
-  "last_csv_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/source_code/gui/v5/data/19_06_2026",
+  "last_csv_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap7_pmsm/plecs",
   "print_pdf": {
     "title1": "",
     "title2": "",
-    "xlabel": "",
-    "ylabel1": "Stator Flux (Wb)",
-    "ylabel2": "Torque (Nm)",
+    "xlabel": "Time (ms)",
+    "ylabel1": "Current (A), dq",
+    "ylabel2": "Speed (RPM)",
     "use_visible": true,
+    "custom_xrange": false,
+    "xmin": 0.05,
+    "xmax": 5.0,
+    "preview_ds": 1,
+    "yauto1": true,
+    "ymin1": -30.0,
+    "ymax1": 23.0,
+    "yauto2": true,
+    "ymin2": 0.0,
+    "ymax2": 22.67,
     "fig_width": 12.0,
-    "fig_height": 4.0,
+    "fig_height": 8.0,
     "dpi": 300,
     "transparent": true,
     "grid": true,
     "minor_grid": false,
     "grid_alpha": 0.5,
     "legend": true,
-    "legend_pos": "upper right",
+    "legend_pos": "best",
     "fs_title": 12,
     "fs_label": 12,
     "fs_tick": 12,
     "fs_legend": 12,
-    "relative_time": false,
-    "time_unit": "s",
+    "relative_time": true,
+    "time_unit": "ms",
+    "plot_style": "line",
     "curve_overrides": {
-      "CH1A": {
-        "color": "#ffd700",
+      "delta conn1:1": {
+        "color": "#984ea3",
         "linewidth": 1.5,
         "linestyle": "-",
-        "legend": "CH1A"
+        "legend": "delta conn1:1"
       },
-      "CH4A": {
-        "color": "#ff4500",
+      "delta conn1:2": {
+        "color": "#ff7f00",
         "linewidth": 1.5,
         "linestyle": "-",
-        "legend": "CH4A"
-      },
-      "CH3A": {
-        "color": "#7fff00",
-        "linewidth": 1.5,
-        "linestyle": "-",
-        "legend": "CH3A"
-      },
-      "CH2A": {
-        "color": "#00ced1",
-        "linewidth": 1.5,
-        "linestyle": "-",
-        "legend": "CH2A"
+        "legend": "delta conn1:2"
       }
     },
     "cursor_p1_show_c1": false,
@@ -58,14 +57,12 @@
     "cursor_p2_show_y": false
   },
   "graph_plot1_vars": [
-    "Vsingle",
-    "V2",
-    "V3"
+    "3ph Meter:Measured current:1"
   ],
   "graph_plot2_vars": [
-    "I2"
+    "delta conn1:2"
   ],
-  "last_pdf_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap5_sim_exp/ind/dtc/plecs",
+  "last_pdf_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap7_pmsm",
   "rt_plot_vars": {
     "plot1": [
       "I2"

@@ -2737,6 +2737,19 @@ class PrintPlotDialog(QtWidgets.QDialog):
         preview_lbl.setAlignment(QtCore.Qt.AlignCenter)
         right_vbox.addWidget(preview_lbl)
 
+        ds_row_w = QtWidgets.QWidget()
+        ds_row = QtWidgets.QHBoxLayout(ds_row_w)
+        ds_row.setContentsMargins(0, 0, 0, 2)
+        ds_row.addWidget(QtWidgets.QLabel("Preview downsample:"))
+        self._combo_preview_ds = QtWidgets.QComboBox()
+        self._combo_preview_ds.addItem("Auto", 0)
+        for _f in (1, 2, 5, 10, 20, 50, 100):
+            self._combo_preview_ds.addItem(f"{_f}×", _f)
+        self._combo_preview_ds.currentIndexChanged.connect(self._schedule_preview)
+        ds_row.addWidget(self._combo_preview_ds)
+        ds_row.addStretch()
+        right_vbox.addWidget(ds_row_w)
+
         try:
             from matplotlib.figure import Figure
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -2798,6 +2811,94 @@ class PrintPlotDialog(QtWidgets.QDialog):
         self.chk_use_visible.toggled.connect(self._schedule_preview)
         xrange_row.addWidget(self.chk_use_visible); xrange_row.addStretch()
         form.addRow("X Range:", xrange_row)
+
+        vx0, vx1 = self._get_visible_xrange()
+        if vx0 is None: vx0 = 0.0
+        if vx1 is None: vx1 = 1.0
+        custom_x_row = QtWidgets.QHBoxLayout()
+        self.chk_custom_xrange = QtWidgets.QCheckBox("Custom:")
+        self.chk_custom_xrange.setChecked(False)
+        self.spin_xmin = QtWidgets.QDoubleSpinBox()
+        self.spin_xmin.setRange(-1e9, 1e9); self.spin_xmin.setValue(vx0)
+        self.spin_xmin.setDecimals(6); self.spin_xmin.setSingleStep(0.001)
+        self.spin_xmin.setEnabled(False)
+        self.spin_xmax = QtWidgets.QDoubleSpinBox()
+        self.spin_xmax.setRange(-1e9, 1e9); self.spin_xmax.setValue(vx1)
+        self.spin_xmax.setDecimals(6); self.spin_xmax.setSingleStep(0.001)
+        self.spin_xmax.setEnabled(False)
+        btn_from_view = QtWidgets.QPushButton("From view")
+        btn_from_view.setFixedWidth(70)
+        btn_from_view.setEnabled(False)
+        def _copy_view_to_custom():
+            x0, x1 = self._get_visible_xrange()
+            if x0 is not None: self.spin_xmin.setValue(x0)
+            if x1 is not None: self.spin_xmax.setValue(x1)
+        btn_from_view.clicked.connect(_copy_view_to_custom)
+        def _on_custom_x_toggled(checked):
+            self.spin_xmin.setEnabled(checked)
+            self.spin_xmax.setEnabled(checked)
+            btn_from_view.setEnabled(checked)
+            self._schedule_preview()
+        self.chk_custom_xrange.toggled.connect(_on_custom_x_toggled)
+        self.spin_xmin.valueChanged.connect(self._schedule_preview)
+        self.spin_xmax.valueChanged.connect(self._schedule_preview)
+        custom_x_row.addWidget(self.chk_custom_xrange)
+        custom_x_row.addSpacing(4)
+        custom_x_row.addWidget(QtWidgets.QLabel("Min (s):")); custom_x_row.addWidget(self.spin_xmin)
+        custom_x_row.addSpacing(6)
+        custom_x_row.addWidget(QtWidgets.QLabel("Max (s):")); custom_x_row.addWidget(self.spin_xmax)
+        custom_x_row.addSpacing(6)
+        custom_x_row.addWidget(btn_from_view)
+        custom_x_row.addStretch()
+        form.addRow("", custom_x_row)
+
+        y0_1, y1_1 = self._get_visible_yrange('plot1')
+        yrange1_row = QtWidgets.QHBoxLayout()
+        self.chk_yauto1 = QtWidgets.QCheckBox("Auto")
+        self.chk_yauto1.setChecked(True)
+        self.spin_ymin1 = QtWidgets.QDoubleSpinBox()
+        self.spin_ymin1.setRange(-1e6, 1e6); self.spin_ymin1.setValue(y0_1)
+        self.spin_ymin1.setDecimals(3); self.spin_ymin1.setSingleStep(1.0); self.spin_ymin1.setEnabled(False)
+        self.spin_ymax1 = QtWidgets.QDoubleSpinBox()
+        self.spin_ymax1.setRange(-1e6, 1e6); self.spin_ymax1.setValue(y1_1)
+        self.spin_ymax1.setDecimals(3); self.spin_ymax1.setSingleStep(1.0); self.spin_ymax1.setEnabled(False)
+        self.chk_yauto1.toggled.connect(lambda checked: (
+            self.spin_ymin1.setEnabled(not checked),
+            self.spin_ymax1.setEnabled(not checked),
+            self._schedule_preview()))
+        self.spin_ymin1.valueChanged.connect(self._schedule_preview)
+        self.spin_ymax1.valueChanged.connect(self._schedule_preview)
+        yrange1_row.addWidget(self.chk_yauto1)
+        yrange1_row.addSpacing(8)
+        yrange1_row.addWidget(QtWidgets.QLabel("Min:")); yrange1_row.addWidget(self.spin_ymin1)
+        yrange1_row.addSpacing(8)
+        yrange1_row.addWidget(QtWidgets.QLabel("Max:")); yrange1_row.addWidget(self.spin_ymax1)
+        yrange1_row.addStretch()
+        form.addRow("Y Range (Plot 1):", yrange1_row)
+
+        y0_2, y1_2 = self._get_visible_yrange('plot2')
+        yrange2_row = QtWidgets.QHBoxLayout()
+        self.chk_yauto2 = QtWidgets.QCheckBox("Auto")
+        self.chk_yauto2.setChecked(True)
+        self.spin_ymin2 = QtWidgets.QDoubleSpinBox()
+        self.spin_ymin2.setRange(-1e6, 1e6); self.spin_ymin2.setValue(y0_2)
+        self.spin_ymin2.setDecimals(3); self.spin_ymin2.setSingleStep(1.0); self.spin_ymin2.setEnabled(False)
+        self.spin_ymax2 = QtWidgets.QDoubleSpinBox()
+        self.spin_ymax2.setRange(-1e6, 1e6); self.spin_ymax2.setValue(y1_2)
+        self.spin_ymax2.setDecimals(3); self.spin_ymax2.setSingleStep(1.0); self.spin_ymax2.setEnabled(False)
+        self.chk_yauto2.toggled.connect(lambda checked: (
+            self.spin_ymin2.setEnabled(not checked),
+            self.spin_ymax2.setEnabled(not checked),
+            self._schedule_preview()))
+        self.spin_ymin2.valueChanged.connect(self._schedule_preview)
+        self.spin_ymax2.valueChanged.connect(self._schedule_preview)
+        yrange2_row.addWidget(self.chk_yauto2)
+        yrange2_row.addSpacing(8)
+        yrange2_row.addWidget(QtWidgets.QLabel("Min:")); yrange2_row.addWidget(self.spin_ymin2)
+        yrange2_row.addSpacing(8)
+        yrange2_row.addWidget(QtWidgets.QLabel("Max:")); yrange2_row.addWidget(self.spin_ymax2)
+        yrange2_row.addStretch()
+        form.addRow("Y Range (Plot 2):", yrange2_row)
 
         xaxis_row = QtWidgets.QHBoxLayout()
         self.chk_relative_time = QtWidgets.QCheckBox("Relative time (start at 0)")
@@ -2955,6 +3056,20 @@ class PrintPlotDialog(QtWidgets.QDialog):
             fonts_row.addWidget(QtWidgets.QLabel(lbl)); fonts_row.addWidget(spin); fonts_row.addSpacing(6)
         fonts_row.addStretch()
         form.addRow("Font Sizes:", fonts_row)
+
+        style_row = QtWidgets.QHBoxLayout()
+        self._plot_style_grp = QtWidgets.QButtonGroup(self)
+        self.radio_style_line     = QtWidgets.QRadioButton("Line")
+        self.radio_style_linedots = QtWidgets.QRadioButton("Line + Dots")
+        self.radio_style_dots     = QtWidgets.QRadioButton("Dots only")
+        self.radio_style_line.setChecked(True)
+        for rb in (self.radio_style_line, self.radio_style_linedots, self.radio_style_dots):
+            self._plot_style_grp.addButton(rb)
+            rb.toggled.connect(self._schedule_preview)
+            style_row.addWidget(rb)
+        style_row.addStretch()
+        form.addRow("Data Style:", style_row)
+
         return w
 
     # ------------------------------------------------------------------ Cursors tab
@@ -3046,11 +3161,21 @@ class PrintPlotDialog(QtWidgets.QDialog):
         except Exception:
             return None, None
 
+    def _get_visible_yrange(self, plot_key):
+        try:
+            pw = self.two_plot.plot1 if plot_key == 'plot1' else self.two_plot.plot2
+            yr = pw.getViewBox().viewRange()[1]
+            return float(yr[0]), float(yr[1])
+        except Exception:
+            return 0.0, 1.0
+
     def _collect_render_params(self):
         """Return a dict of all current render settings."""
         self._sync_legend_names()
         xmin, xmax = (None, None)
-        if self.chk_use_visible.isChecked():
+        if self.chk_custom_xrange.isChecked():
+            xmin, xmax = self.spin_xmin.value(), self.spin_xmax.value()
+        elif self.chk_use_visible.isChecked():
             xmin, xmax = self._get_visible_xrange()
         return dict(
             include_p1   = self.chk_plot1.isChecked() and bool(self.curves['plot1']),
@@ -3072,6 +3197,10 @@ class PrintPlotDialog(QtWidgets.QDialog):
             fs_legend    = self.spin_fs_legend.value(),
             xmin          = xmin,
             xmax          = xmax,
+            ymin1 = None if self.chk_yauto1.isChecked() else self.spin_ymin1.value(),
+            ymax1 = None if self.chk_yauto1.isChecked() else self.spin_ymax1.value(),
+            ymin2 = None if self.chk_yauto2.isChecked() else self.spin_ymin2.value(),
+            ymax2 = None if self.chk_yauto2.isChecked() else self.spin_ymax2.value(),
             relative_time = self.chk_relative_time.isChecked(),
             time_unit     = self.combo_time_unit.currentData(),
             # Cursor overlay
@@ -3093,6 +3222,11 @@ class PrintPlotDialog(QtWidgets.QDialog):
             cursor_p2_show_c2    = self._chk_cur('p2', 'c2'),
             cursor_p2_show_arrow = self._chk_cur('p2', 'arrow'),
             cursor_p2_show_y     = self._chk_cur('p2', 'y'),
+            plot_style = (
+                'dots'     if self.radio_style_dots.isChecked() else
+                'line+dots' if self.radio_style_linedots.isChecked() else
+                'line'
+            ),
         )
 
     def _render_to_figure(self, fig, params, downsample=1):
@@ -3115,8 +3249,9 @@ class PrintPlotDialog(QtWidgets.QDialog):
         relative_time = params.get('relative_time', False)
         time_unit     = params.get('time_unit', 's')
 
-        x_scale  = {'s': 1.0, 'ms': 1e3, 'us': 1e6}.get(time_unit, 1.0)
-        x_offset = (xmin if (relative_time and xmin is not None) else 0.0)
+        x_scale   = {'s': 1.0, 'ms': 1e3, 'us': 1e6}.get(time_unit, 1.0)
+        x_offset  = (xmin if (relative_time and xmin is not None) else 0.0)
+        plot_style = params.get('plot_style', 'line')
 
         fig.clear()
         n_axes   = int(include_p1) + int(include_p2)
@@ -3161,8 +3296,12 @@ class PrintPlotDialog(QtWidgets.QDialog):
                     y = y[::downsample]
                 if not is_fft:
                     x = (x - x_offset) * x_scale
+                _ls = '' if plot_style == 'dots' else c['linestyle']
+                _mk = 'o' if plot_style in ('line+dots', 'dots') else 'None'
+                _ms = 3.5
                 ax.plot(x, y, label=c['legend'], color=c['color'],
-                        linewidth=c['linewidth'], linestyle=c['linestyle'],
+                        linewidth=c['linewidth'], linestyle=_ls,
+                        marker=_mk, markersize=_ms,
                         antialiased=True)
             if title:
                 ax.set_title(title, fontsize=fs_title, fontweight='bold', pad=6)
@@ -3207,6 +3346,12 @@ class PrintPlotDialog(QtWidgets.QDialog):
                 # Draw cursor overlays (only for time-domain plots)
                 cur_prefix = 'p1' if plot_key == 'plot1' else 'p2'
                 self._draw_cursors_on_ax(ax, cur_prefix, params, x_scale, x_offset, xmin, xmax)
+            # Apply explicit Y range (overrides auto / FFT range)
+            pk_idx = '1' if plot_key == 'plot1' else '2'
+            ymin_v = params.get(f'ymin{pk_idx}')
+            ymax_v = params.get(f'ymax{pk_idx}')
+            if ymin_v is not None and ymax_v is not None and ymax_v > ymin_v:
+                ax.set_ylim(ymin_v, ymax_v)
 
         # Bottom x-label for non-FFT last axis
         if axes and not self.plot_is_fft.get(plot_spec[-1][0], False):
@@ -3292,10 +3437,13 @@ class PrintPlotDialog(QtWidgets.QDialog):
             return
         try:
             params = self._collect_render_params()
-            # Compute downsample so preview never exceeds _PREVIEW_MAX_PTS per curve
-            all_curves = self.curves['plot1'] + self.curves['plot2']
-            max_len = max((len(c['x']) for c in all_curves), default=1)
-            ds = max(1, int(np.ceil(max_len / self._PREVIEW_MAX_PTS)))
+            ds_choice = self._combo_preview_ds.currentData()
+            if ds_choice == 0:  # Auto
+                all_curves = self.curves['plot1'] + self.curves['plot2']
+                max_len = max((len(c['x']) for c in all_curves), default=1)
+                ds = max(1, int(np.ceil(max_len / self._PREVIEW_MAX_PTS)))
+            else:
+                ds = ds_choice
             self._render_to_figure(self._preview_fig, params, downsample=ds)
             self._preview_canvas.draw_idle()
         except Exception:
@@ -3320,6 +3468,16 @@ class PrintPlotDialog(QtWidgets.QDialog):
             'ylabel1':     self.edit_ylabel1.text(),
             'ylabel2':     self.edit_ylabel2.text(),
             'use_visible': self.chk_use_visible.isChecked(),
+            'custom_xrange': self.chk_custom_xrange.isChecked(),
+            'xmin':          self.spin_xmin.value(),
+            'xmax':          self.spin_xmax.value(),
+            'preview_ds':    self._combo_preview_ds.currentData(),
+            'yauto1':      self.chk_yauto1.isChecked(),
+            'ymin1':       self.spin_ymin1.value(),
+            'ymax1':       self.spin_ymax1.value(),
+            'yauto2':      self.chk_yauto2.isChecked(),
+            'ymin2':       self.spin_ymin2.value(),
+            'ymax2':       self.spin_ymax2.value(),
             'fig_width':   self.spin_width.value(),
             'fig_height':  self.spin_height.value(),
             'dpi':         self.spin_dpi.value(),
@@ -3335,6 +3493,11 @@ class PrintPlotDialog(QtWidgets.QDialog):
             'fs_legend':      self.spin_fs_legend.value(),
             'relative_time':  self.chk_relative_time.isChecked(),
             'time_unit':      self.combo_time_unit.currentData(),
+            'plot_style': (
+                'dots'      if self.radio_style_dots.isChecked() else
+                'line+dots' if self.radio_style_linedots.isChecked() else
+                'line'
+            ),
             'curve_overrides': curve_overrides,
             'cursor_p1_show_c1':    self._chk_cur('p1', 'c1'),
             'cursor_p1_show_c2':    self._chk_cur('p1', 'c2'),
@@ -3366,7 +3529,29 @@ class PrintPlotDialog(QtWidgets.QDialog):
         _set(self.edit_xlabel,       'xlabel',      lambda w, v: w.setText(v))
         _set(self.edit_ylabel1,      'ylabel1',     lambda w, v: w.setText(v))
         _set(self.edit_ylabel2,      'ylabel2',     lambda w, v: w.setText(v))
-        _set(self.chk_use_visible,   'use_visible', lambda w, v: w.setChecked(bool(v)))
+        _set(self.chk_use_visible,   'use_visible',   lambda w, v: w.setChecked(bool(v)))
+        _set(self.chk_custom_xrange, 'custom_xrange', lambda w, v: w.setChecked(bool(v)))
+        _set(self.spin_xmin,         'xmin',          lambda w, v: w.setValue(float(v)))
+        _set(self.spin_xmax,         'xmax',          lambda w, v: w.setValue(float(v)))
+        self.spin_xmin.setEnabled(self.chk_custom_xrange.isChecked())
+        self.spin_xmax.setEnabled(self.chk_custom_xrange.isChecked())
+        try:
+            pds = s.get('preview_ds', 0)
+            idx = self._combo_preview_ds.findData(pds)
+            if idx >= 0:
+                self._combo_preview_ds.setCurrentIndex(idx)
+        except Exception:
+            pass
+        _set(self.chk_yauto1,        'yauto1',      lambda w, v: w.setChecked(bool(v)))
+        _set(self.spin_ymin1,        'ymin1',       lambda w, v: w.setValue(float(v)))
+        _set(self.spin_ymax1,        'ymax1',       lambda w, v: w.setValue(float(v)))
+        _set(self.chk_yauto2,        'yauto2',      lambda w, v: w.setChecked(bool(v)))
+        _set(self.spin_ymin2,        'ymin2',       lambda w, v: w.setValue(float(v)))
+        _set(self.spin_ymax2,        'ymax2',       lambda w, v: w.setValue(float(v)))
+        self.spin_ymin1.setEnabled(not self.chk_yauto1.isChecked())
+        self.spin_ymax1.setEnabled(not self.chk_yauto1.isChecked())
+        self.spin_ymin2.setEnabled(not self.chk_yauto2.isChecked())
+        self.spin_ymax2.setEnabled(not self.chk_yauto2.isChecked())
         _set(self.spin_width,        'fig_width',   lambda w, v: w.setValue(float(v)))
         _set(self.spin_height,       'fig_height',  lambda w, v: w.setValue(float(v)))
         _set(self.spin_dpi,          'dpi',         lambda w, v: w.setValue(int(v)))
@@ -3411,6 +3596,17 @@ class PrintPlotDialog(QtWidgets.QDialog):
             idx = self.combo_legend_pos.findText(lp)
             if idx >= 0:
                 self.combo_legend_pos.setCurrentIndex(idx)
+        except Exception:
+            pass
+
+        try:
+            ps = s.get('plot_style', 'line')
+            if ps == 'dots':
+                self.radio_style_dots.setChecked(True)
+            elif ps == 'line+dots':
+                self.radio_style_linedots.setChecked(True)
+            else:
+                self.radio_style_line.setChecked(True)
         except Exception:
             pass
 
@@ -5902,6 +6098,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.csv_infos_layout = QtWidgets.QVBoxLayout(self.csv_infos_container)
         self.csv_infos_layout.setContentsMargins(0, 0, 0, 0)
         self.csv_infos_layout.setSpacing(2)
+        # Hard cap so adding many CSV info rows never grows the window vertically
+        self.csv_infos_container.setMaximumHeight(80)
         v.addWidget(self.csv_infos_container)
 
         # Combined channel selection and zoom controls (will be populated when CSV is loaded)
@@ -6724,7 +6922,10 @@ class MainWindow(QtWidgets.QMainWindow):
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(4)
         lbl = QtWidgets.QLabel(text)
-        row_layout.addWidget(lbl)
+        # Ignored horizontal policy: label does not contribute its full text width to
+        # the layout's minimum size, preventing the main window from auto-expanding.
+        lbl.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        row_layout.addWidget(lbl, 1)  # stretch=1 so it fills available width
         btn_x = QtWidgets.QPushButton("✕")
         btn_x.setFixedSize(18, 18)
         btn_x.setToolTip(f"Close dataset {ds_id}")
