@@ -1,15 +1,15 @@
 {
-  "last_csv_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap7_pmsm/plecs",
+  "last_csv_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap5_sim_exp/grouped/pmsm/foc/fs_trq=16__fswitching=8__sensored=enabled__spdc=0.1__cc=0.001",
   "print_pdf": {
     "title1": "",
     "title2": "",
-    "xlabel": "Time (ms)",
+    "xlabel": "Time (s)",
     "ylabel1": "Current (A), dq",
     "ylabel2": "Speed (RPM)",
     "use_visible": true,
-    "custom_xrange": false,
+    "custom_xrange": true,
     "xmin": 0.05,
-    "xmax": 5.0,
+    "xmax": 4.88,
     "preview_ds": 1,
     "yauto1": true,
     "ymin1": -30.0,
@@ -31,20 +31,42 @@
     "fs_tick": 12,
     "fs_legend": 12,
     "relative_time": true,
-    "time_unit": "ms",
-    "plot_style": "line",
+    "time_unit": "s",
     "curve_overrides": {
-      "delta conn1:1": {
-        "color": "#984ea3",
-        "linewidth": 1.5,
+      "Id": {
+        "color": "#005500",
+        "linewidth": 0.5,
         "linestyle": "-",
-        "legend": "delta conn1:1"
+        "legend": "Id",
+        "plot_style": "line"
       },
-      "delta conn1:2": {
-        "color": "#ff7f00",
-        "linewidth": 1.5,
+      "Iq": {
+        "color": "#00aa00",
+        "linewidth": 0.5,
         "linestyle": "-",
-        "legend": "delta conn1:2"
+        "legend": "Iq",
+        "plot_style": "line"
+      },
+      "Id_ref": {
+        "color": "#ff0000",
+        "linewidth": 1.0,
+        "linestyle": "-",
+        "legend": "Id_ref",
+        "plot_style": "line"
+      },
+      "Iq_ref": {
+        "color": "#005d88",
+        "linewidth": 1.0,
+        "linestyle": "-",
+        "legend": "Iq_ref",
+        "plot_style": "line"
+      },
+      "motor_rpm": {
+        "color": "#ff0000",
+        "linewidth": 1.0,
+        "linestyle": "-",
+        "legend": "motor_rpm",
+        "plot_style": "line"
       }
     },
     "cursor_p1_show_c1": false,
@@ -57,10 +79,10 @@
     "cursor_p2_show_y": false
   },
   "graph_plot1_vars": [
-    "3ph Meter:Measured current:1"
+    "I1"
   ],
   "graph_plot2_vars": [
-    "delta conn1:2"
+    "motor_rpm"
   ],
   "last_pdf_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap7_pmsm",
   "rt_plot_vars": {

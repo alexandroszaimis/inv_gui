@@ -2642,6 +2642,7 @@ class PrintPlotDialog(QtWidgets.QDialog):
                         'name': name, 'legend': name,
                         'x': x, 'y': y,
                         'color': pen_color, 'linewidth': 1.5, 'linestyle': '-',
+                        'plot_style': 'line',
                     })
         pw1_ids = {id(i) for i in self.two_plot.plot1.listDataItems()}
         pw2_ids = {id(i) for i in self.two_plot.plot2.listDataItems()}
@@ -2663,6 +2664,7 @@ class PrintPlotDialog(QtWidgets.QDialog):
                 'name': name, 'legend': name,
                 'x': x, 'y': y,
                 'color': pen_color, 'linewidth': 1.5, 'linestyle': '-',
+                'plot_style': 'line',
             })
 
     def _extract_cursor_data(self):
@@ -2942,14 +2944,15 @@ class PrintPlotDialog(QtWidgets.QDialog):
             vbox.addWidget(QtWidgets.QLabel("No data plotted in this window."))
             return w
 
-        tbl = QtWidgets.QTableWidget(len(curves), 5)
-        tbl.setHorizontalHeaderLabels(["Channel", "Legend Name", "Color", "Line Style", "Width"])
+        tbl = QtWidgets.QTableWidget(len(curves), 6)
+        tbl.setHorizontalHeaderLabels(["Channel", "Legend Name", "Color", "Line Style", "Width", "Data Style"])
         hdr = tbl.horizontalHeader()
         hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
         hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeToContents)
         tbl.verticalHeader().setVisible(False)
         tbl.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
         # Legend name edits trigger preview
@@ -2992,6 +2995,16 @@ class PrintPlotDialog(QtWidgets.QDialog):
                 spin.valueChanged.connect(lambda v: (c.update({'linewidth': v}), self._schedule_preview()))
             _make_width_cb(w_spin, curve)
             tbl.setCellWidget(row, 4, w_spin)
+
+            ds_combo = QtWidgets.QComboBox()
+            for ds_label, ds_val in [("Line", "line"), ("Line+Dots", "line+dots"), ("Dots", "dots")]:
+                ds_combo.addItem(ds_label, ds_val)
+            cur_ps = curve.get('plot_style', 'line')
+            ds_combo.setCurrentIndex({'line': 0, 'line+dots': 1, 'dots': 2}.get(cur_ps, 0))
+            def _make_ds_cb(combo, c):
+                combo.currentIndexChanged.connect(lambda _: (c.update({'plot_style': combo.currentData()}), self._schedule_preview()))
+            _make_ds_cb(ds_combo, curve)
+            tbl.setCellWidget(row, 5, ds_combo)
 
         if plot_key == 'plot1':
             self._table_p1 = tbl
@@ -3056,19 +3069,6 @@ class PrintPlotDialog(QtWidgets.QDialog):
             fonts_row.addWidget(QtWidgets.QLabel(lbl)); fonts_row.addWidget(spin); fonts_row.addSpacing(6)
         fonts_row.addStretch()
         form.addRow("Font Sizes:", fonts_row)
-
-        style_row = QtWidgets.QHBoxLayout()
-        self._plot_style_grp = QtWidgets.QButtonGroup(self)
-        self.radio_style_line     = QtWidgets.QRadioButton("Line")
-        self.radio_style_linedots = QtWidgets.QRadioButton("Line + Dots")
-        self.radio_style_dots     = QtWidgets.QRadioButton("Dots only")
-        self.radio_style_line.setChecked(True)
-        for rb in (self.radio_style_line, self.radio_style_linedots, self.radio_style_dots):
-            self._plot_style_grp.addButton(rb)
-            rb.toggled.connect(self._schedule_preview)
-            style_row.addWidget(rb)
-        style_row.addStretch()
-        form.addRow("Data Style:", style_row)
 
         return w
 
@@ -3222,11 +3222,6 @@ class PrintPlotDialog(QtWidgets.QDialog):
             cursor_p2_show_c2    = self._chk_cur('p2', 'c2'),
             cursor_p2_show_arrow = self._chk_cur('p2', 'arrow'),
             cursor_p2_show_y     = self._chk_cur('p2', 'y'),
-            plot_style = (
-                'dots'     if self.radio_style_dots.isChecked() else
-                'line+dots' if self.radio_style_linedots.isChecked() else
-                'line'
-            ),
         )
 
     def _render_to_figure(self, fig, params, downsample=1):
@@ -3251,7 +3246,6 @@ class PrintPlotDialog(QtWidgets.QDialog):
 
         x_scale   = {'s': 1.0, 'ms': 1e3, 'us': 1e6}.get(time_unit, 1.0)
         x_offset  = (xmin if (relative_time and xmin is not None) else 0.0)
-        plot_style = params.get('plot_style', 'line')
 
         fig.clear()
         n_axes   = int(include_p1) + int(include_p2)
@@ -3296,8 +3290,9 @@ class PrintPlotDialog(QtWidgets.QDialog):
                     y = y[::downsample]
                 if not is_fft:
                     x = (x - x_offset) * x_scale
-                _ls = '' if plot_style == 'dots' else c['linestyle']
-                _mk = 'o' if plot_style in ('line+dots', 'dots') else 'None'
+                _ps = c.get('plot_style', 'line')
+                _ls = '' if _ps == 'dots' else c['linestyle']
+                _mk = 'o' if _ps in ('line+dots', 'dots') else 'None'
                 _ms = 3.5
                 ax.plot(x, y, label=c['legend'], color=c['color'],
                         linewidth=c['linewidth'], linestyle=_ls,
@@ -3460,6 +3455,7 @@ class PrintPlotDialog(QtWidgets.QDialog):
                     'linewidth': c['linewidth'],
                     'linestyle': c['linestyle'],
                     'legend': c['legend'],
+                    'plot_style': c.get('plot_style', 'line'),
                 }
         return {
             'title1':      self.edit_title1.text(),
@@ -3493,11 +3489,6 @@ class PrintPlotDialog(QtWidgets.QDialog):
             'fs_legend':      self.spin_fs_legend.value(),
             'relative_time':  self.chk_relative_time.isChecked(),
             'time_unit':      self.combo_time_unit.currentData(),
-            'plot_style': (
-                'dots'      if self.radio_style_dots.isChecked() else
-                'line+dots' if self.radio_style_linedots.isChecked() else
-                'line'
-            ),
             'curve_overrides': curve_overrides,
             'cursor_p1_show_c1':    self._chk_cur('p1', 'c1'),
             'cursor_p1_show_c2':    self._chk_cur('p1', 'c2'),
@@ -3599,17 +3590,6 @@ class PrintPlotDialog(QtWidgets.QDialog):
         except Exception:
             pass
 
-        try:
-            ps = s.get('plot_style', 'line')
-            if ps == 'dots':
-                self.radio_style_dots.setChecked(True)
-            elif ps == 'line+dots':
-                self.radio_style_linedots.setChecked(True)
-            else:
-                self.radio_style_line.setChecked(True)
-        except Exception:
-            pass
-
         # Restore per-curve overrides matched by channel name
         overrides = s.get('curve_overrides', {})
         if overrides:
@@ -3619,10 +3599,11 @@ class PrintPlotDialog(QtWidgets.QDialog):
                     ov = overrides.get(curve['name'])
                     if not ov:
                         continue
-                    curve['color']     = ov.get('color',     curve['color'])
-                    curve['linewidth'] = ov.get('linewidth', curve['linewidth'])
-                    curve['linestyle'] = ov.get('linestyle', curve['linestyle'])
-                    curve['legend']    = ov.get('legend',    curve['legend'])
+                    curve['color']      = ov.get('color',      curve['color'])
+                    curve['linewidth']  = ov.get('linewidth',  curve['linewidth'])
+                    curve['linestyle']  = ov.get('linestyle',  curve['linestyle'])
+                    curve['legend']     = ov.get('legend',     curve['legend'])
+                    curve['plot_style'] = ov.get('plot_style', curve.get('plot_style', 'line'))
                     if tbl is None:
                         continue
                     # Update color button
@@ -3630,7 +3611,7 @@ class PrintPlotDialog(QtWidgets.QDialog):
                     if btn:
                         btn.setStyleSheet(f"background-color: {curve['color']}; border: 1px solid #888;")
                         btn.setProperty("hex_color", curve['color'])
-                    # Update style combo
+                    # Update line style combo
                     combo = tbl.cellWidget(row, 3)
                     if combo:
                         for i in range(combo.count()):
@@ -3645,6 +3626,13 @@ class PrintPlotDialog(QtWidgets.QDialog):
                         spin.blockSignals(True)
                         spin.setValue(curve['linewidth'])
                         spin.blockSignals(False)
+                    # Update data style combo
+                    ds_combo = tbl.cellWidget(row, 5)
+                    if ds_combo:
+                        ps_idx = {'line': 0, 'line+dots': 1, 'dots': 2}.get(curve['plot_style'], 0)
+                        ds_combo.blockSignals(True)
+                        ds_combo.setCurrentIndex(ps_idx)
+                        ds_combo.blockSignals(False)
                     # Update legend name cell
                     item = tbl.item(row, 1)
                     if item:
@@ -3718,6 +3706,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dataset_labels_by_id = {}
         self.dataset_paths_by_id = {}
         self.dataset_settings_by_id = {}
+        self.dataset_manual_sample_time_by_id = {}
 
         self._recv_values = {}
 
@@ -6635,6 +6624,42 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.dataset_channels_by_id[ds_id] = list(channel_cols)
                 self.dataset_paths_by_id[ds_id] = path
                 self.dataset_settings_by_id[ds_id] = dict(settings_dict)
+                # Determine sample time for this overlay dataset
+                def _sf2(v):
+                    try:
+                        s = str(v).strip()
+                        return float(s) if s and s.lower() != "nan" else None
+                    except Exception:
+                        return None
+                _ts_div2 = _sf2(settings_dict.get("data_logger_ts_div"))
+                _fs_trq2 = _sf2(settings_dict.get("Fs_trq"))
+                if not (_ts_div2 and _ts_div2 > 0 and _fs_trq2 and _fs_trq2 > 0):
+                    _raw2, _ok2 = QtWidgets.QInputDialog.getText(
+                        self,
+                        "Sampling Time Unknown",
+                        f"CSV {ds_id}: Neither Fs_trq nor data_logger_ts_div was found.\n"
+                        "Enter the sampling time per sample (seconds).\n"
+                        "Accepts decimals (0.000125), fractions (1/16000), or sci notation (62.5e-6):",
+                        QtWidgets.QLineEdit.Normal,
+                        "1.0",
+                    )
+                    _user_sec2 = 1.0
+                    if _ok2 and _raw2.strip():
+                        try:
+                            if '/' in _raw2:
+                                _n2, _d2 = _raw2.split('/', 1)
+                                _user_sec2 = float(_n2.strip()) / float(_d2.strip())
+                            else:
+                                _user_sec2 = float(_raw2.strip())
+                            if _user_sec2 <= 0:
+                                raise ValueError("must be positive")
+                        except Exception:
+                            QtWidgets.QMessageBox.warning(
+                                self, "Invalid Input",
+                                f"Could not parse '{_raw2}' as a sampling time.\nFalling back to 1 sample = 1 unit."
+                            )
+                            _user_sec2 = 1.0
+                    self.dataset_manual_sample_time_by_id[ds_id] = _user_sec2
                 # Append items to selectors with prefix
                 prefixed = [f"{ds_id}. {c}" for c in channel_cols]
                 self.combo_csv_plot1.append_items(prefixed)
@@ -7217,13 +7242,39 @@ class MainWindow(QtWidgets.QMainWindow):
                     return None
             ts_div = _safe_float(settings.get("data_logger_ts_div"))
             fs_trq = _safe_float(settings.get("Fs_trq"))
+            next_ds_id = int(self.dataset_count) + 1
             if ts_div and ts_div > 0 and fs_trq and fs_trq > 0:
                 sec_per_sample = ts_div / (fs_trq * 1000.0)
             else:
-                # Fallback to current graph time scale (may be 1.0 = samples)
-                sec_per_sample = float(getattr(self.two_plot, "_sec_per_sample", 1.0))
+                _raw_ov, _ok_ov = QtWidgets.QInputDialog.getText(
+                    self,
+                    "Sampling Time Unknown",
+                    f"CSV {next_ds_id}: Neither Fs_trq nor data_logger_ts_div was found.\n"
+                    "Enter the sampling time per sample (seconds).\n"
+                    "Accepts decimals (0.000125), fractions (1/16000), or sci notation (62.5e-6):",
+                    QtWidgets.QLineEdit.Normal,
+                    "1.0",
+                )
+                _user_sec_ov = 1.0
+                if _ok_ov and _raw_ov.strip():
+                    try:
+                        if '/' in _raw_ov:
+                            _n_ov, _d_ov = _raw_ov.split('/', 1)
+                            _user_sec_ov = float(_n_ov.strip()) / float(_d_ov.strip())
+                        else:
+                            _user_sec_ov = float(_raw_ov.strip())
+                        if _user_sec_ov <= 0:
+                            raise ValueError("must be positive")
+                    except Exception:
+                        QtWidgets.QMessageBox.warning(
+                            self, "Invalid Input",
+                            f"Could not parse '{_raw_ov}' as a sampling time.\nFalling back to 1 sample = 1 unit."
+                        )
+                        _user_sec_ov = 1.0
+                sec_per_sample = _user_sec_ov
+                self.dataset_manual_sample_time_by_id[next_ds_id] = _user_sec_ov
             # Register dataset and update selectors with prefixed names
-            self.dataset_count = int(self.dataset_count) + 1
+            self.dataset_count = next_ds_id
             ds_id = self.dataset_count
             self.dataset_labels_by_id[ds_id] = os.path.basename(path)
             self.dataset_channels_by_id[ds_id] = list(overlay_cols)
@@ -7299,6 +7350,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.dataset_labels_by_id = {}
             self.dataset_paths_by_id = {}
             self.dataset_settings_by_id = {}
+            self.dataset_manual_sample_time_by_id = {}
             self.current_csv_path = None
             self.current_csv_manual_sample_time = None
             self.available_channels = []
@@ -7343,6 +7395,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.dataset_labels_by_id.pop(ds_id, None)
             self.dataset_channels_by_id.pop(ds_id, None)
             self.dataset_settings_by_id.pop(ds_id, None)
+            self.dataset_manual_sample_time_by_id.pop(ds_id, None)
             # Remove info row widget
             row_widget = self._csv_info_rows_by_id.pop(ds_id, None)
             if row_widget is not None:
@@ -7464,7 +7517,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if tsf and tsf > 0 and fsf and fsf > 0:
                 sec_per_sample = tsf / (fsf * 1000.0)
             else:
-                sec_per_sample = float(getattr(self.two_plot, "_sec_per_sample", 1.0))
+                sec_per_sample = float(self.dataset_manual_sample_time_by_id.get(ds_id, 1.0))
             # Load only requested columns
             import pandas as pd
             try:
