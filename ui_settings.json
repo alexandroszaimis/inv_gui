@@ -1,15 +1,15 @@
 {
-  "last_csv_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap5_sim_exp/grouped/pmsm/foc/fs_trq=16__fswitching=8__sensored=enabled__spdc=0.1__cc=0.001",
+  "last_csv_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap7_pmsm",
   "print_pdf": {
     "title1": "",
     "title2": "",
-    "xlabel": "Time (s)",
-    "ylabel1": "Current (A), dq",
+    "xlabel": "Time (ms)",
+    "ylabel1": "Phase Current (A)",
     "ylabel2": "Speed (RPM)",
     "use_visible": true,
     "custom_xrange": true,
-    "xmin": 0.05,
-    "xmax": 4.88,
+    "xmin": 3.81056,
+    "xmax": 3.81216,
     "preview_ds": 1,
     "yauto1": true,
     "ymin1": -30.0,
@@ -18,47 +18,26 @@
     "ymin2": 0.0,
     "ymax2": 22.67,
     "fig_width": 12.0,
-    "fig_height": 8.0,
+    "fig_height": 4.0,
     "dpi": 300,
     "transparent": true,
     "grid": true,
     "minor_grid": false,
     "grid_alpha": 0.5,
-    "legend": true,
+    "legend": false,
     "legend_pos": "best",
     "fs_title": 12,
     "fs_label": 12,
     "fs_tick": 12,
     "fs_legend": 12,
     "relative_time": true,
-    "time_unit": "s",
+    "time_unit": "ms",
     "curve_overrides": {
-      "Id": {
-        "color": "#005500",
-        "linewidth": 0.5,
-        "linestyle": "-",
-        "legend": "Id",
-        "plot_style": "line"
-      },
-      "Iq": {
-        "color": "#00aa00",
-        "linewidth": 0.5,
-        "linestyle": "-",
-        "legend": "Iq",
-        "plot_style": "line"
-      },
-      "Id_ref": {
+      "I1": {
         "color": "#ff0000",
         "linewidth": 1.0,
         "linestyle": "-",
-        "legend": "Id_ref",
-        "plot_style": "line"
-      },
-      "Iq_ref": {
-        "color": "#005d88",
-        "linewidth": 1.0,
-        "linestyle": "-",
-        "legend": "Iq_ref",
+        "legend": "I1",
         "plot_style": "line"
       },
       "motor_rpm": {
@@ -84,7 +63,7 @@
   "graph_plot2_vars": [
     "motor_rpm"
   ],
-  "last_pdf_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap7_pmsm",
+  "last_pdf_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap7_pmsm/sampled_currents",
   "rt_plot_vars": {
     "plot1": [
       "I2"

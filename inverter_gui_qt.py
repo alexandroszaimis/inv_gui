@@ -1318,6 +1318,7 @@ class TwoWindowPlot(QtWidgets.QWidget):
         self._current_groups2 = None
         self._current_link_x = True
         self._current_downsample_factor = 1  # Track current downsample factor
+        self._step_mode = False  # False = linear interp, 'right' = zero-order hold
 
         # ---- single, persistent layout ----
         self._vbox = QtWidgets.QVBoxLayout(self)
@@ -2419,7 +2420,8 @@ class TwoWindowPlot(QtWidgets.QWidget):
                         curve.setData(x=[], y=[])
                         continue
                     # x is already decimated, y needs to match
-                    curve.setData(x=x, y=y_col[::ds], connect='finite', skipFiniteCheck=True)
+                    curve.setData(x=x, y=y_col[::ds], connect='finite', skipFiniteCheck=True,
+                                  stepMode='right' if self._step_mode else False)
                     curve_idx += 1
                     # Update UI more frequently to keep GUI responsive, especially for second plot
                     if curve_idx % 3 == 0:  # Update every 3 curves (more frequent)
@@ -2516,7 +2518,8 @@ class TwoWindowPlot(QtWidgets.QWidget):
             except Exception:
                 x, y = [], []
                 pen = pg.mkPen('#888', width=1.2)
-            item = self.plot1.plot(x=x, y=y, name=f"{name}{lab}", pen=pen, connect='finite', skipFiniteCheck=True)
+            item = self.plot1.plot(x=x, y=y, name=f"{name}{lab}", pen=pen, connect='finite', skipFiniteCheck=True,
+                                   stepMode='right' if self._step_mode else False)
             self._overlay_items.append(item)
         # Plot2
         for name, xy in (win2_data or {}).items():
@@ -2526,7 +2529,8 @@ class TwoWindowPlot(QtWidgets.QWidget):
             except Exception:
                 x, y = [], []
                 pen = pg.mkPen('#888', width=1.2)
-            item = self.plot2.plot(x=x, y=y, name=f"{name}{lab}", pen=pen, connect='finite', skipFiniteCheck=True)
+            item = self.plot2.plot(x=x, y=y, name=f"{name}{lab}", pen=pen, connect='finite', skipFiniteCheck=True,
+                                   stepMode='right' if self._step_mode else False)
             self._overlay_items.append(item)
         # Keep zero lines above curves
         try:
@@ -3294,10 +3298,13 @@ class PrintPlotDialog(QtWidgets.QDialog):
                 _ls = '' if _ps == 'dots' else c['linestyle']
                 _mk = 'o' if _ps in ('line+dots', 'dots') else 'None'
                 _ms = 3.5
+                _ds = ('steps-post'
+                       if getattr(self.two_plot, '_step_mode', False) and _ps != 'dots'
+                       else 'default')
                 ax.plot(x, y, label=c['legend'], color=c['color'],
                         linewidth=c['linewidth'], linestyle=_ls,
                         marker=_mk, markersize=_ms,
-                        antialiased=True)
+                        drawstyle=_ds, antialiased=True)
             if title:
                 ax.set_title(title, fontsize=fs_title, fontweight='bold', pad=6)
             # Y label: use FFT-specific label if in FFT mode and no user override
@@ -6160,6 +6167,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.graph_fft_p2_chk.toggled.connect(self._on_fft_p2_toggled)
         self.graph_fft_vis_chk.toggled.connect(self._on_fft_options_changed)
         self.graph_fft_log_chk.toggled.connect(self._on_fft_options_changed)
+        # Draw mode: linear interpolation vs zero-order hold
+        channel_selection_layout.addSpacing(6)
+        channel_selection_layout.addWidget(QtWidgets.QLabel("Draw:"))
+        self.graph_draw_mode_combo = QtWidgets.QComboBox()
+        self.graph_draw_mode_combo.addItem("Linear", "linear")
+        self.graph_draw_mode_combo.addItem("Step (ZOH)", "step")
+        self.graph_draw_mode_combo.setToolTip("Linear: interpolate between samples\nStep (ZOH): zero-order hold — value holds until next sample")
+        self.graph_draw_mode_combo.currentIndexChanged.connect(self._on_draw_mode_changed)
+        channel_selection_layout.addWidget(self.graph_draw_mode_combo)
         # Cursors readout — two stacked rows so values don't overflow horizontally
         _cur_container = QtWidgets.QWidget()
         _cur_vbox = QtWidgets.QVBoxLayout(_cur_container)
@@ -7000,6 +7016,12 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+
+    def _on_draw_mode_changed(self):
+        """Switch between linear interpolation and zero-order hold (step) rendering."""
+        mode = self.graph_draw_mode_combo.currentData()
+        self.two_plot._step_mode = (mode == "step")
+        self._on_csv_channels_changed()
 
     def _plot_csv_path(self, path: str):
         """Plot CSV with current channel selections."""
