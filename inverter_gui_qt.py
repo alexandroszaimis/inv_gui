@@ -2712,11 +2712,17 @@ class PrintPlotDialog(QtWidgets.QDialog):
     # Max points per curve shown in preview (keeps it fast)
     _PREVIEW_MAX_PTS = 3000
 
-    def __init__(self, two_plot_widget, parent=None):
+    def __init__(self, two_plot_widget, parent=None,
+                 settings_namespace='print_pdf', combo_key=None):
         super().__init__(parent)
         self.setWindowTitle("Print to PDF")
         self.resize(1280, 720)
         self.two_plot = two_plot_widget
+        # Namespace separates persisted settings per dialog kind (graph tab
+        # vs XY plot); within a namespace, settings are additionally stored
+        # per plotted-variable combination.
+        self._settings_ns = str(settings_namespace)
+        self._combo_key_override = combo_key
         self._table_p1 = None
         self._table_p2 = None
         self._preview_canvas = None
@@ -2727,6 +2733,14 @@ class PrintPlotDialog(QtWidgets.QDialog):
         self._preview_timer.timeout.connect(self._update_preview)
         self._extract_curve_data()
         self._extract_cursor_data()
+        # Signature of the plotted variable combination — settings are
+        # remembered per combination within the namespace.
+        if self._combo_key_override:
+            self._combo_key = str(self._combo_key_override)
+        else:
+            n1 = ",".join(sorted(c['name'] for c in self.curves['plot1']))
+            n2 = ",".join(sorted(c['name'] for c in self.curves['plot2']))
+            self._combo_key = f"P1:{n1}|P2:{n2}"
         self._build_ui()
         self._load_settings()
         # First preview after UI settles
@@ -3653,7 +3667,13 @@ class PrintPlotDialog(QtWidgets.QDialog):
 
     def _load_settings(self):
         try:
-            s = _load_ui_settings().get('print_pdf', {})
+            all_s = _load_ui_settings()
+            # Namespace default (last-used) as base, then the settings saved
+            # for THIS exact variable combination override it — including
+            # labels, titles, per-curve colors/thickness/styles, everything.
+            s = dict(all_s.get(self._settings_ns, {}))
+            s.update(all_s.get(self._settings_ns + '_by_combo', {})
+                     .get(self._combo_key, {}))
             if not s:
                 return
         except Exception:
@@ -3792,7 +3812,21 @@ class PrintPlotDialog(QtWidgets.QDialog):
                         tbl.blockSignals(False)
 
     def _save_settings(self):
-        _save_ui_settings({'print_pdf': self._settings_to_dict()})
+        data = self._settings_to_dict()
+        try:
+            by_combo = dict(_load_ui_settings().get(
+                self._settings_ns + '_by_combo', {}))
+        except Exception:
+            by_combo = {}
+        by_combo[self._combo_key] = data
+        # Keep the per-combo store bounded (drop oldest entries beyond 200)
+        if len(by_combo) > 200:
+            for k in list(by_combo.keys())[:len(by_combo) - 200]:
+                by_combo.pop(k, None)
+        _save_ui_settings({
+            self._settings_ns: data,  # namespace default for new combinations
+            self._settings_ns + '_by_combo': by_combo,
+        })
 
     def closeEvent(self, event):
         self._save_settings()
@@ -4151,19 +4185,469 @@ class XYPlotDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.information(self, "Print to PDF",
                                               "Nothing to print yet.")
             return
-        dlg = PrintPlotDialog(self._make_print_adapter(), self)
-        # Sensible defaults for an XY plot (the saved settings are tuned
-        # for time plots): axis labels from the selected variables and no
-        # relative-time shift of the X data.
+        combo_key = f"XY:{self._xname} vs {self._yname}"
+        dlg = PrintPlotDialog(self._make_print_adapter(), self,
+                              settings_namespace='print_pdf_xy',
+                              combo_key=combo_key)
+        # Prefill sensible XY defaults ONLY when this variable combination
+        # has no saved settings yet (otherwise the stored labels/styles for
+        # this exact combination were just loaded and must be kept).
         try:
-            dlg.edit_xlabel.setText(self._xname)
-            dlg.edit_ylabel1.setText(self._yname)
-            dlg.chk_relative_time.setChecked(False)
-            dlg.combo_time_unit.blockSignals(True)
-            dlg.combo_time_unit.setCurrentIndex(0)
-            dlg.combo_time_unit.blockSignals(False)
+            has_saved = combo_key in _load_ui_settings().get(
+                'print_pdf_xy_by_combo', {})
+        except Exception:
+            has_saved = False
+        if not has_saved:
+            try:
+                dlg.edit_xlabel.setText(self._xname)
+                dlg.edit_ylabel1.setText(self._yname)
+                dlg.chk_relative_time.setChecked(False)
+                dlg.combo_time_unit.blockSignals(True)
+                dlg.combo_time_unit.setCurrentIndex(0)
+                dlg.combo_time_unit.blockSignals(False)
+            except Exception:
+                pass
+        dlg.exec()
+
+
+# ----------------------- Math Plot window -----------------------
+class MathPlotDialog(QtWidgets.QDialog):
+    """Independent window plotting mathematical expressions of the loaded
+    channels against time (e.g. I1*V1, 2*motor_rpm + 10, sqrt(Id**2+Iq**2)).
+
+    Multiple expressions can be plotted together as separate curves, and
+    multiple instances of the window can be open simultaneously.
+    """
+
+    _PALETTE = ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00",
+                "#f781bf", "#00ffff", "#1e90ff", "#ff1493", "#00ff7f"]
+
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self._mw = main_window
+        self.setWindowTitle("Math Plot")
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        self.setWindowFlags(QtCore.Qt.Window)
+        self.resize(1000, 700)
+
+        self._exprs = []            # list of expression strings (plot order)
+        self._curve_items = []      # PlotDataItems, parallel to _exprs
+        self._chan_cache = {}       # (ds_id, name) -> np.ndarray
+        self._pan_mode = True
+        self._zoom_axis = "none"
+
+        # Safe evaluation namespace (numpy-backed functions and constants)
+        self._safe_funcs = {}
+        for fname in ('sin', 'cos', 'tan', 'arcsin', 'arccos', 'arctan',
+                      'arctan2', 'sinh', 'cosh', 'tanh', 'exp', 'log',
+                      'log10', 'sqrt', 'sign', 'floor', 'ceil',
+                      'minimum', 'maximum', 'clip', 'gradient', 'cumsum',
+                      'diff', 'unwrap', 'deg2rad', 'rad2deg'):
+            try:
+                self._safe_funcs[fname] = getattr(np, fname)
+            except AttributeError:
+                pass
+        self._safe_funcs.update({'abs': np.abs, 'round': np.round,
+                                 'pi': np.pi, 'e': np.e})
+
+        # identifier -> (ds_id, channel). Dataset 1 channels are exposed by
+        # their bare (sanitized) name, other datasets as d<id>_<name>.
+        import re as _re
+        self._var_map = {}
+        try:
+            for ds_id in sorted(main_window.dataset_channels_by_id.keys()):
+                for ch in main_window.dataset_channels_by_id[ds_id]:
+                    ident = _re.sub(r'\W', '_', str(ch))
+                    if ident and ident[0].isdigit():
+                        ident = '_' + ident
+                    if int(ds_id) != 1:
+                        ident = f"d{ds_id}_{ident}"
+                    while ident in self._var_map or ident in self._safe_funcs:
+                        ident += "_"
+                    self._var_map[ident] = (int(ds_id), str(ch))
         except Exception:
             pass
+
+        v = QtWidgets.QVBoxLayout(self)
+
+        # ---- expression entry row ----
+        row1 = QtWidgets.QHBoxLayout()
+        row1.addWidget(QtWidgets.QLabel("Expression:"))
+        self.expr_edit = QtWidgets.QLineEdit()
+        self.expr_edit.setPlaceholderText(
+            "e.g. I1*V1   |   2*motor_rpm + 10   |   sqrt(Id**2 + Iq**2)")
+        row1.addWidget(self.expr_edit, 1)
+        row1.addWidget(QtWidgets.QLabel("Insert var:"))
+        self.var_combo = QtWidgets.QComboBox()
+        self.var_combo.setMinimumWidth(160)
+        self.var_combo.addItem("")
+        for ident in self._var_map:
+            self.var_combo.addItem(ident)
+        row1.addWidget(self.var_combo)
+        self.add_btn = QtWidgets.QPushButton("Add curve")
+        row1.addWidget(self.add_btn)
+        v.addLayout(row1)
+
+        # ---- active expressions list ----
+        row2 = QtWidgets.QHBoxLayout()
+        self.expr_list = QtWidgets.QListWidget()
+        self.expr_list.setMaximumHeight(64)
+        self.expr_list.setToolTip("Plotted expressions (select and press "
+                                  "'Remove selected' to delete)")
+        row2.addWidget(self.expr_list, 1)
+        col = QtWidgets.QVBoxLayout()
+        self.remove_btn = QtWidgets.QPushButton("Remove selected")
+        self.clear_btn = QtWidgets.QPushButton("Clear all")
+        col.addWidget(self.remove_btn)
+        col.addWidget(self.clear_btn)
+        col.addStretch(1)
+        row2.addLayout(col)
+        v.addLayout(row2)
+
+        # ---- plot ----
+        self.pw = pg.PlotWidget()
+        self.pw.showGrid(x=True, y=True)
+        self.pw.addLegend()
+        self.pw.setLabel('bottom', 'Time (s)')
+        self.vb = self.pw.getViewBox()
+        v.addWidget(self.pw, 1)
+
+        # ---- cursors (two crosshairs, same colours as the graph tab) ----
+        pen1 = pg.mkPen((255, 200, 0), width=1)
+        pen2 = pg.mkPen((0, 200, 255), width=1)
+        self._c1_v = pg.InfiniteLine(angle=90, movable=True, pen=pen1)
+        self._c1_h = pg.InfiniteLine(angle=0,  movable=True, pen=pen1)
+        self._c2_v = pg.InfiniteLine(angle=90, movable=True, pen=pen2)
+        self._c2_h = pg.InfiniteLine(angle=0,  movable=True, pen=pen2)
+        for ln in (self._c1_v, self._c1_h, self._c2_v, self._c2_h):
+            ln.setZValue(1_000_001)
+            ln.hide()
+            self.pw.addItem(ln)
+            ln.sigPositionChanged.connect(self._update_cursor_info)
+
+        # ---- bottom row: zoom / pan / fit / cursors / pdf ----
+        ctrl2 = QtWidgets.QHBoxLayout()
+        self.zoomx_btn = QtWidgets.QPushButton("Zoom X")
+        self.zoomy_btn = QtWidgets.QPushButton("Zoom Y")
+        self.fit_btn = QtWidgets.QPushButton("Fit View")
+        for b in (self.zoomx_btn, self.zoomy_btn):
+            b.setCheckable(True)
+        ctrl2.addWidget(self.zoomx_btn)
+        ctrl2.addWidget(self.zoomy_btn)
+        ctrl2.addWidget(self.fit_btn)
+        self.pan_chk = QtWidgets.QCheckBox("Pan")
+        self.pan_chk.setChecked(True)
+        ctrl2.addWidget(self.pan_chk)
+        self.cursors_chk = QtWidgets.QCheckBox("Cursors")
+        ctrl2.addWidget(self.cursors_chk)
+        self.cursor_info = QtWidgets.QLabel("")
+        self.cursor_info.setVisible(False)
+        ctrl2.addWidget(self.cursor_info)
+        ctrl2.addSpacing(12)
+        self.status_lbl = QtWidgets.QLabel("Add an expression to plot")
+        self.status_lbl.setStyleSheet("color: #666; font-style: italic;")
+        ctrl2.addWidget(self.status_lbl)
+        ctrl2.addStretch(1)
+        self.pdf_btn = QtWidgets.QPushButton("Print to PDF…")
+        ctrl2.addWidget(self.pdf_btn)
+        v.addLayout(ctrl2)
+
+        # ---- wiring ----
+        self.add_btn.clicked.connect(self._add_expr)
+        self.expr_edit.returnPressed.connect(self._add_expr)
+        self.var_combo.activated.connect(self._insert_var_token)
+        self.remove_btn.clicked.connect(self._remove_selected)
+        self.clear_btn.clicked.connect(self._clear_all)
+        self.zoomx_btn.clicked.connect(self._on_zoomx)
+        self.zoomy_btn.clicked.connect(self._on_zoomy)
+        self.fit_btn.clicked.connect(self._fit_view)
+        self.pan_chk.toggled.connect(self._on_pan_toggled)
+        self.cursors_chk.toggled.connect(self._on_cursors_toggled)
+        self.pdf_btn.clicked.connect(self._print_pdf)
+        self._set_zoom_mode("none")
+
+    # ---------- expression handling ----------
+    def _insert_var_token(self, _ix):
+        tok = self.var_combo.currentText()
+        if tok:
+            self.expr_edit.insert(tok)
+            self.expr_edit.setFocus()
+        self.var_combo.setCurrentIndex(0)
+
+    def _sec_for_ds(self, ds_id):
+        """Seconds per (original) sample for a dataset, like the graph tab."""
+        def _sf(val):
+            try:
+                s = str(val).strip()
+                return float(s) if s and s.lower() != 'nan' else None
+            except Exception:
+                return None
+        settings = self._mw.dataset_settings_by_id.get(ds_id, {}) or {}
+        ts = _sf(settings.get("data_logger_ts_div"))
+        fs = _sf(settings.get("Fs_trq"))
+        if ts and ts > 0 and fs and fs > 0:
+            return ts / (fs * 1000.0)
+        manual = None
+        if int(ds_id) == 1:
+            manual = getattr(self._mw, "current_csv_manual_sample_time", None)
+        if not manual:
+            manual = self._mw.dataset_manual_sample_time_by_id.get(ds_id)
+        if not manual:
+            manual = getattr(self._mw, "current_csv_manual_sample_time", None)
+        return float(manual or 1.0)
+
+    def _downsample_factor(self):
+        try:
+            f = int(self._mw.csv_downsample_combo.currentData() or 1)
+            return max(1, f)
+        except Exception:
+            return 1
+
+    def _get_channel(self, ds_id, name):
+        key = (ds_id, name)
+        if key in self._chan_cache:
+            return self._chan_cache[key]
+        path = self._mw.dataset_paths_by_id.get(ds_id)
+        if not path:
+            return None
+        try:
+            df = pd.read_csv(path, usecols=[name], engine="c",
+                             on_bad_lines="skip")
+        except Exception:
+            try:
+                df = pd.read_csv(path, usecols=[name], engine="python",
+                                 on_bad_lines="skip")
+            except Exception:
+                return None
+        arr = pd.to_numeric(df[name], errors="coerce").to_numpy(dtype=np.float64)
+        f = self._downsample_factor()
+        if f > 1:
+            arr = arr[::f]
+        self._chan_cache[key] = arr
+        return arr
+
+    def _eval_expr(self, expr):
+        """Evaluate an expression string -> (x_seconds, y_array)."""
+        import re as _re
+        tokens = set(_re.findall(r"[A-Za-z_]\w*", expr))
+        used = [t for t in tokens if t in self._var_map]
+        if not used:
+            raise ValueError("expression must reference at least one channel "
+                             "(use 'Insert var')")
+        arrays = {}
+        n = None
+        for t in used:
+            arr = self._get_channel(*self._var_map[t])
+            if arr is None or len(arr) == 0:
+                raise ValueError(f"failed to load '{t}'")
+            arrays[t] = arr
+            n = len(arr) if n is None else min(n, len(arr))
+        if n is None or n < 2:
+            raise ValueError("not enough samples")
+        for t in arrays:
+            arrays[t] = arrays[t][:n]
+        ns = dict(self._safe_funcs)
+        ns.update(arrays)
+        result = eval(expr, {"__builtins__": {}}, ns)  # noqa: S307 (local tool)
+        result = np.asarray(result, dtype=np.float64)
+        if result.ndim == 0:
+            result = np.full(n, float(result))
+        if result.ndim != 1:
+            raise ValueError("expression must produce a 1-D signal")
+        # Time base from the first referenced channel's dataset
+        ds_id = self._var_map[sorted(used)[0]][0]
+        stride = self._downsample_factor() * self._sec_for_ds(ds_id)
+        x = np.arange(len(result), dtype=np.float64) * stride
+        return x, result
+
+    def _add_expr(self):
+        expr = self.expr_edit.text().strip()
+        if not expr:
+            return
+        try:
+            x, y = self._eval_expr(expr)
+        except Exception as exc:
+            self.status_lbl.setText(f"Error: {exc}")
+            return
+        color = self._PALETTE[len(self._exprs) % len(self._PALETTE)]
+        item = self.pw.plot(x, y, name=expr,
+                            pen=pg.mkPen(color, width=1.2),
+                            connect='finite')
+        self._exprs.append(expr)
+        self._curve_items.append(item)
+        self.expr_list.addItem(expr)
+        self.expr_edit.clear()
+        self.status_lbl.setText(f"{len(self._exprs)} curve(s), {len(y)} points")
+        self._fit_view()
+
+    def _remove_selected(self):
+        row = self.expr_list.currentRow()
+        if row < 0:
+            return
+        self.expr_list.takeItem(row)
+        self._exprs.pop(row)
+        item = self._curve_items.pop(row)
+        try:
+            self.pw.removeItem(item)
+        except Exception:
+            pass
+        self.status_lbl.setText(f"{len(self._exprs)} curve(s)")
+
+    def _clear_all(self):
+        while self._curve_items:
+            item = self._curve_items.pop()
+            try:
+                self.pw.removeItem(item)
+            except Exception:
+                pass
+        self._exprs.clear()
+        self.expr_list.clear()
+        self.status_lbl.setText("Add an expression to plot")
+
+    # ---------- view control (same behaviour as the graph tab) ----------
+    def _fit_view(self):
+        xmins, xmaxs, ymins, ymaxs = [], [], [], []
+        for item in self._curve_items:
+            x, y = item.xData, item.yData
+            if x is None or y is None or len(x) == 0:
+                continue
+            m = np.isfinite(y)
+            if not m.any():
+                continue
+            xmins.append(float(np.nanmin(x)))
+            xmaxs.append(float(np.nanmax(x)))
+            ymins.append(float(np.min(y[m])))
+            ymaxs.append(float(np.max(y[m])))
+        if not xmins:
+            return
+        xmin, xmax = min(xmins), max(xmaxs)
+        ymin, ymax = min(ymins), max(ymaxs)
+        # Same conventions as the graph tab: include 0 on Y
+        if ymin > 0.0:
+            ymin = 0.0
+        if ymax < 0.0:
+            ymax = 0.0
+        if xmax == xmin:
+            xmax = xmin + 1.0
+        if ymax == ymin:
+            ymax = ymin + 1.0
+        x_pad = 0.05 * (xmax - xmin)
+        y_pad = 0.05 * (ymax - ymin)
+        try:
+            self.vb.setLimits(xMin=xmin - x_pad, xMax=xmax + x_pad,
+                              yMin=ymin - y_pad, yMax=ymax + y_pad,
+                              minXRange=(xmax - xmin) * 1e-9,
+                              minYRange=(ymax - ymin) * 1e-9,
+                              maxXRange=None, maxYRange=None)
+        except Exception:
+            pass
+        self.vb.disableAutoRange()
+        # X: exact data span (no padding); Y: 5% headroom
+        self.vb.setXRange(xmin, xmax, padding=0)
+        self.vb.setYRange(ymin, ymax, padding=0.05)
+        self.zoomx_btn.setChecked(False)
+        self.zoomy_btn.setChecked(False)
+        self._set_zoom_mode("none")
+
+    def _set_zoom_mode(self, mode):
+        self._zoom_axis = mode if mode in ("x", "y") else "none"
+        mm = pg.ViewBox.PanMode if self._pan_mode else pg.ViewBox.RectMode
+        xr, yr = self.vb.viewRange()
+        self.vb.disableAutoRange()
+        self.vb.setXRange(xr[0], xr[1], padding=0)
+        self.vb.setYRange(yr[0], yr[1], padding=0)
+        if mode == "x":
+            self.vb.setMouseMode(mm)
+            self.vb.setMouseEnabled(x=True, y=False)
+        elif mode == "y":
+            self.vb.setMouseMode(mm)
+            self.vb.setMouseEnabled(x=False, y=True)
+        else:
+            self.vb.setMouseMode(pg.ViewBox.PanMode)
+            self.vb.setMouseEnabled(x=True, y=True)
+
+    def _on_zoomx(self, checked):
+        self.zoomy_btn.setChecked(False)
+        self._set_zoom_mode("x" if checked else "none")
+
+    def _on_zoomy(self, checked):
+        self.zoomx_btn.setChecked(False)
+        self._set_zoom_mode("y" if checked else "none")
+
+    def _on_pan_toggled(self, checked):
+        self._pan_mode = bool(checked)
+        self._set_zoom_mode(self._zoom_axis)
+
+    # ---------- cursors ----------
+    def _on_cursors_toggled(self, checked):
+        self.cursor_info.setVisible(bool(checked))
+        if checked:
+            xr, yr = self.vb.viewRange()
+            self._c1_v.setPos(xr[0] + (xr[1] - xr[0]) * 0.33)
+            self._c2_v.setPos(xr[0] + (xr[1] - xr[0]) * 0.66)
+            self._c1_h.setPos(yr[0] + (yr[1] - yr[0]) * 0.33)
+            self._c2_h.setPos(yr[0] + (yr[1] - yr[0]) * 0.66)
+        for ln in (self._c1_v, self._c1_h, self._c2_v, self._c2_h):
+            ln.setVisible(bool(checked))
+        if checked:
+            self._update_cursor_info()
+
+    def _update_cursor_info(self, *_a):
+        try:
+            x1 = float(self._c1_v.value()); y1 = float(self._c1_h.value())
+            x2 = float(self._c2_v.value()); y2 = float(self._c2_h.value())
+        except Exception:
+            return
+        dt = x2 - x1
+        freq = (1.0 / dt) if dt not in (0.0, -0.0) else float('inf')
+        self.cursor_info.setText(
+            f"C1: ({x1:.6g}, {y1:.6g})   C2: ({x2:.6g}, {y2:.6g})   "
+            f"Δt={dt:.6g} s (1/Δt={freq:.6g} Hz), Δy={y2 - y1:.6g}"
+        )
+
+    # ---------- PDF export ----------
+    def _make_print_adapter(self):
+        """Minimal stand-in for TwoWindowPlot for PrintPlotDialog."""
+        if not hasattr(self, "_empty_pw"):
+            self._empty_pw = pg.PlotWidget()
+            self._empty_pw.hide()
+
+        class _Adapter:
+            pass
+
+        a = _Adapter()
+        a.plot1 = self.pw
+        a.plot2 = self._empty_pw
+        a._curves = {(1, expr): item
+                     for expr, item in zip(self._exprs, self._curve_items)}
+        a._overlay_items = []
+        a._fft_enabled = {1: False, 2: False}
+        a._fft_log = {1: False, 2: False}
+        a._fft_curves = {}
+        a._fft_saved_data = {}
+        a._step_mode = False
+        a._cursors_enabled = bool(self.cursors_chk.isChecked())
+        a._cursor1_v = self._c1_v
+        a._cursor1_h = self._c1_h
+        a._cursor2_v = self._c2_v
+        a._cursor2_h = self._c2_h
+        a._cursors2_enabled = False
+        a._p2_cursor1_v = self._c1_v
+        a._p2_cursor1_h = self._c1_h
+        a._p2_cursor2_v = self._c2_v
+        a._p2_cursor2_h = self._c2_h
+        return a
+
+    def _print_pdf(self):
+        """Open the full Print-to-PDF settings dialog for this math plot."""
+        if not self._curve_items:
+            QtWidgets.QMessageBox.information(self, "Print to PDF",
+                                              "Nothing to print yet.")
+            return
+        combo_key = "MATH:" + "|".join(sorted(self._exprs))
+        dlg = PrintPlotDialog(self._make_print_adapter(), self,
+                              settings_namespace='print_pdf_math',
+                              combo_key=combo_key)
         dlg.exec()
 
 
@@ -6533,6 +7017,12 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_plot_xy.setToolTip("Plot one variable against another in a separate window\n(each click opens a new independent window)")
         btn_plot_xy.clicked.connect(self._open_xy_plot)
         ctrl.addWidget(btn_plot_xy)
+        btn_plot_math = QtWidgets.QPushButton("Plot Math")
+        btn_plot_math.setToolTip("Plot mathematical expressions of the available variables\n"
+                                 "(e.g. I1*V1, psi_d_ac**2 + psi_q_ac**2, 2*motor_rpm + 10)\n"
+                                 "Each click opens a new independent window")
+        btn_plot_math.clicked.connect(self._open_math_plot)
+        ctrl.addWidget(btn_plot_math)
         
         # CSV info display (list of loaded datasets with settings)
         self.csv_info_label = QtWidgets.QLabel("No CSV loaded")
@@ -8518,6 +9008,25 @@ class MainWindow(QtWidgets.QMainWindow):
         def _forget(*_a, dlg_ref=dlg):
             try:
                 self._xy_windows.remove(dlg_ref)
+            except (ValueError, RuntimeError):
+                pass
+        dlg.destroyed.connect(_forget)
+        dlg.show()
+
+    def _open_math_plot(self):
+        """Open a NEW independent Math plot window (multiple can be open)."""
+        if int(getattr(self, "dataset_count", 0)) == 0:
+            QtWidgets.QMessageBox.information(
+                self, "Plot Math", "Load a CSV first.")
+            return
+        if not hasattr(self, "_math_windows"):
+            self._math_windows = []
+        dlg = MathPlotDialog(self)
+        self._math_windows.append(dlg)
+
+        def _forget(*_a, dlg_ref=dlg):
+            try:
+                self._math_windows.remove(dlg_ref)
             except (ValueError, RuntimeError):
                 pass
         dlg.destroyed.connect(_forget)
