@@ -939,7 +939,27 @@ class MultiSelectCombo(QtWidgets.QComboBox):
         self.setModel(self._model)
         if items:
             self.set_items(items)
-        self.view().pressed.connect(self._on_index_pressed)
+        # Toggle items via an event filter on the popup viewport instead of
+        # view().pressed: clicks on the checkbox indicator itself are consumed
+        # by the item delegate (which changes the check state WITHOUT any
+        # signal), so pressed never fired for them and the plot was not
+        # updated. The filter handles text and checkbox clicks identically
+        # and consumes the event so the delegate cannot double-toggle.
+        self.view().viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if obj is self.view().viewport() and ev.type() in (
+                QtCore.QEvent.MouseButtonRelease,
+                QtCore.QEvent.MouseButtonDblClick):
+            try:
+                pos = ev.position().toPoint()
+            except AttributeError:
+                pos = ev.pos()
+            index = self.view().indexAt(pos)
+            if index.isValid():
+                self._on_index_pressed(index)
+            return True  # consume: keep popup open, block delegate toggle
+        return super().eventFilter(obj, ev)
 
     def set_items(self, items):
         self._model.clear()
@@ -3820,6 +3840,333 @@ class PrintPlotDialog(QtWidgets.QDialog):
             )
 
 
+# ----------------------- XY Plot window -----------------------
+class XYPlotDialog(QtWidgets.QDialog):
+    """Independent window plotting one channel against another (X-Y plot).
+
+    Multiple instances can be open simultaneously; each loads its own data
+    from the CSVs registered in the main window and keeps its own view,
+    cursors and zoom state.
+    """
+
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self._mw = main_window
+        self.setWindowTitle("XY Plot")
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        # Real top-level window (own minimise/maximise, not stuck on top)
+        self.setWindowFlags(QtCore.Qt.Window)
+        self.resize(900, 650)
+
+        self._x = None
+        self._y = None
+        self._xname = ""
+        self._yname = ""
+        self._pan_mode = True
+        self._zoom_axis = "none"
+
+        v = QtWidgets.QVBoxLayout(self)
+
+        # ---- top row: variable selection ----
+        ctrl = QtWidgets.QHBoxLayout()
+        ctrl.addWidget(QtWidgets.QLabel("X var:"))
+        self.x_combo = QtWidgets.QComboBox()
+        self.x_combo.setMinimumWidth(160)
+        ctrl.addWidget(self.x_combo)
+        ctrl.addWidget(QtWidgets.QLabel("Y var:"))
+        self.y_combo = QtWidgets.QComboBox()
+        self.y_combo.setMinimumWidth(160)
+        ctrl.addWidget(self.y_combo)
+        ctrl.addSpacing(12)
+        ctrl.addWidget(QtWidgets.QLabel("Draw:"))
+        self.style_combo = QtWidgets.QComboBox()
+        self.style_combo.addItems(["Line", "Dots"])
+        ctrl.addWidget(self.style_combo)
+        ctrl.addSpacing(12)
+        self.status_lbl = QtWidgets.QLabel("Select X and Y variables")
+        self.status_lbl.setStyleSheet("color: #666; font-style: italic;")
+        ctrl.addWidget(self.status_lbl)
+        ctrl.addStretch(1)
+        v.addLayout(ctrl)
+
+        # ---- plot ----
+        self.pw = pg.PlotWidget()
+        self.pw.showGrid(x=True, y=True)
+        self.vb = self.pw.getViewBox()
+        self.curve = self.pw.plot([], [], pen=pg.mkPen('#1e90ff', width=1.2),
+                                  connect='finite')
+        v.addWidget(self.pw, 1)
+
+        # ---- cursors (two crosshairs, same colours as the graph tab) ----
+        pen1 = pg.mkPen((255, 200, 0), width=1)
+        pen2 = pg.mkPen((0, 200, 255), width=1)
+        self._c1_v = pg.InfiniteLine(angle=90, movable=True, pen=pen1)
+        self._c1_h = pg.InfiniteLine(angle=0,  movable=True, pen=pen1)
+        self._c2_v = pg.InfiniteLine(angle=90, movable=True, pen=pen2)
+        self._c2_h = pg.InfiniteLine(angle=0,  movable=True, pen=pen2)
+        for ln in (self._c1_v, self._c1_h, self._c2_v, self._c2_h):
+            ln.setZValue(1_000_001)
+            ln.hide()
+            self.pw.addItem(ln)
+            ln.sigPositionChanged.connect(self._update_cursor_info)
+
+        # ---- bottom row: zoom / pan / fit / cursors / pdf ----
+        ctrl2 = QtWidgets.QHBoxLayout()
+        self.zoomx_btn = QtWidgets.QPushButton("Zoom X")
+        self.zoomy_btn = QtWidgets.QPushButton("Zoom Y")
+        self.fit_btn = QtWidgets.QPushButton("Fit View")
+        for b in (self.zoomx_btn, self.zoomy_btn):
+            b.setCheckable(True)
+        ctrl2.addWidget(self.zoomx_btn)
+        ctrl2.addWidget(self.zoomy_btn)
+        ctrl2.addWidget(self.fit_btn)
+        self.pan_chk = QtWidgets.QCheckBox("Pan")
+        self.pan_chk.setChecked(True)
+        self.pan_chk.setToolTip("When checked, left-click drags pan the view; "
+                                "unchecked, drags draw a rubber-band zoom")
+        ctrl2.addWidget(self.pan_chk)
+        self.cursors_chk = QtWidgets.QCheckBox("Cursors")
+        ctrl2.addWidget(self.cursors_chk)
+        self.cursor_info = QtWidgets.QLabel("")
+        self.cursor_info.setVisible(False)
+        ctrl2.addWidget(self.cursor_info)
+        ctrl2.addStretch(1)
+        self.pdf_btn = QtWidgets.QPushButton("Print to PDF…")
+        ctrl2.addWidget(self.pdf_btn)
+        v.addLayout(ctrl2)
+
+        # ---- populate variable selectors from all loaded datasets ----
+        items = [""]
+        try:
+            for ds_id in sorted(main_window.dataset_channels_by_id.keys()):
+                for c in main_window.dataset_channels_by_id[ds_id]:
+                    items.append(f"{ds_id}. {c}")
+        except Exception:
+            pass
+        self.x_combo.addItems(items)
+        self.y_combo.addItems(items)
+
+        # ---- wiring ----
+        self.x_combo.currentTextChanged.connect(self._reload)
+        self.y_combo.currentTextChanged.connect(self._reload)
+        self.style_combo.currentIndexChanged.connect(self._apply_style)
+        self.zoomx_btn.clicked.connect(self._on_zoomx)
+        self.zoomy_btn.clicked.connect(self._on_zoomy)
+        self.fit_btn.clicked.connect(self._fit_view)
+        self.pan_chk.toggled.connect(self._on_pan_toggled)
+        self.cursors_chk.toggled.connect(self._on_cursors_toggled)
+        self.pdf_btn.clicked.connect(self._print_pdf)
+        self._set_zoom_mode("none")
+
+    # ---------- data ----------
+    @staticmethod
+    def _parse_sel(text):
+        t = str(text).strip()
+        if not t or "." not in t[:4]:
+            return None
+        try:
+            num, name = t.split(".", 1)
+            return int(num.strip()), name.strip()
+        except Exception:
+            return None
+
+    def _load_channel(self, ds_id, name):
+        path = self._mw.dataset_paths_by_id.get(ds_id)
+        if not path:
+            return None
+        try:
+            df = pd.read_csv(path, usecols=[name], engine="c", on_bad_lines="skip")
+        except Exception:
+            try:
+                df = pd.read_csv(path, usecols=[name], engine="python", on_bad_lines="skip")
+            except Exception:
+                return None
+        arr = pd.to_numeric(df[name], errors="coerce").to_numpy(dtype=np.float64)
+        # Follow the graph tab's downsample setting
+        try:
+            f = int(self._mw.csv_downsample_combo.currentData() or 1)
+        except Exception:
+            f = 1
+        if f > 1:
+            arr = arr[::f]
+        return arr
+
+    def _reload(self, *_a):
+        sx = self._parse_sel(self.x_combo.currentText())
+        sy = self._parse_sel(self.y_combo.currentText())
+        if sx is None or sy is None:
+            return
+        x = self._load_channel(*sx)
+        y = self._load_channel(*sy)
+        if x is None or y is None or len(x) == 0 or len(y) == 0:
+            self.status_lbl.setText("Failed to load data")
+            return
+        n = min(len(x), len(y))
+        note = "" if len(x) == len(y) else f" (lengths differ: truncated to {n})"
+        self._x = x[:n]
+        self._y = y[:n]
+        self._xname = f"{sx[0]}. {sx[1]}"
+        self._yname = f"{sy[0]}. {sy[1]}"
+        self._apply_style()
+        self.pw.setLabel('bottom', self._xname)
+        self.pw.setLabel('left', self._yname)
+        self.pw.setTitle(f"{self._yname} vs {self._xname}")
+        self.status_lbl.setText(f"{n} points{note}")
+        self._fit_view()
+
+    def _apply_style(self, *_a):
+        if self._x is None:
+            return
+        if self.style_combo.currentIndex() == 1:  # Dots
+            self.curve.setData(self._x, self._y, pen=None, symbol='o',
+                               symbolSize=3, symbolPen=None,
+                               symbolBrush='#1e90ff')
+        else:
+            self.curve.setData(self._x, self._y,
+                               pen=pg.mkPen('#1e90ff', width=1.2),
+                               symbol=None, connect='finite')
+
+    # ---------- view control ----------
+    def _fit_view(self):
+        if self._x is None or self._y is None:
+            return
+        m = np.isfinite(self._x) & np.isfinite(self._y)
+        if not m.any():
+            return
+        xmin = float(np.min(self._x[m])); xmax = float(np.max(self._x[m]))
+        ymin = float(np.min(self._y[m])); ymax = float(np.max(self._y[m]))
+        if xmax == xmin:
+            xmax = xmin + 1.0
+        if ymax == ymin:
+            ymax = ymin + 1.0
+        x_pad = 0.05 * (xmax - xmin)
+        y_pad = 0.05 * (ymax - ymin)
+        try:
+            self.vb.setLimits(xMin=xmin - x_pad, xMax=xmax + x_pad,
+                              yMin=ymin - y_pad, yMax=ymax + y_pad,
+                              minXRange=(xmax - xmin) * 1e-9,
+                              minYRange=(ymax - ymin) * 1e-9,
+                              maxXRange=None, maxYRange=None)
+        except Exception:
+            pass
+        self.vb.disableAutoRange()
+        self.vb.setXRange(xmin, xmax, padding=0.05)
+        self.vb.setYRange(ymin, ymax, padding=0.05)
+        self.zoomx_btn.setChecked(False)
+        self.zoomy_btn.setChecked(False)
+        self._set_zoom_mode("none")
+
+    def _set_zoom_mode(self, mode):
+        self._zoom_axis = mode if mode in ("x", "y") else "none"
+        mm = pg.ViewBox.PanMode if self._pan_mode else pg.ViewBox.RectMode
+        xr, yr = self.vb.viewRange()
+        self.vb.disableAutoRange()
+        self.vb.setXRange(xr[0], xr[1], padding=0)
+        self.vb.setYRange(yr[0], yr[1], padding=0)
+        if mode == "x":
+            self.vb.setMouseMode(mm)
+            self.vb.setMouseEnabled(x=True, y=False)
+        elif mode == "y":
+            self.vb.setMouseMode(mm)
+            self.vb.setMouseEnabled(x=False, y=True)
+        else:
+            self.vb.setMouseMode(pg.ViewBox.PanMode)
+            self.vb.setMouseEnabled(x=True, y=True)
+
+    def _on_zoomx(self, checked):
+        self.zoomy_btn.setChecked(False)
+        self._set_zoom_mode("x" if checked else "none")
+
+    def _on_zoomy(self, checked):
+        self.zoomx_btn.setChecked(False)
+        self._set_zoom_mode("y" if checked else "none")
+
+    def _on_pan_toggled(self, checked):
+        self._pan_mode = bool(checked)
+        self._set_zoom_mode(self._zoom_axis)
+
+    # ---------- cursors ----------
+    def _on_cursors_toggled(self, checked):
+        self.cursor_info.setVisible(bool(checked))
+        if checked:
+            xr, yr = self.vb.viewRange()
+            self._c1_v.setPos(xr[0] + (xr[1] - xr[0]) * 0.33)
+            self._c2_v.setPos(xr[0] + (xr[1] - xr[0]) * 0.66)
+            self._c1_h.setPos(yr[0] + (yr[1] - yr[0]) * 0.33)
+            self._c2_h.setPos(yr[0] + (yr[1] - yr[0]) * 0.66)
+        for ln in (self._c1_v, self._c1_h, self._c2_v, self._c2_h):
+            ln.setVisible(bool(checked))
+        if checked:
+            self._update_cursor_info()
+
+    def _update_cursor_info(self, *_a):
+        try:
+            x1 = float(self._c1_v.value()); y1 = float(self._c1_h.value())
+            x2 = float(self._c2_v.value()); y2 = float(self._c2_h.value())
+        except Exception:
+            return
+        self.cursor_info.setText(
+            f"C1: ({x1:.6g}, {y1:.6g})   C2: ({x2:.6g}, {y2:.6g})   "
+            f"Δx={x2 - x1:.6g}, Δy={y2 - y1:.6g}"
+        )
+
+    # ---------- PDF export ----------
+    def _make_print_adapter(self):
+        """Minimal stand-in for TwoWindowPlot so the full PrintPlotDialog
+        (settings + live preview) can render this single XY plot. Plot 2 is
+        an empty hidden widget, so only Plot 1 appears in the PDF."""
+        if not hasattr(self, "_empty_pw"):
+            self._empty_pw = pg.PlotWidget()
+            self._empty_pw.hide()
+
+        class _Adapter:
+            pass
+
+        a = _Adapter()
+        a.plot1 = self.pw
+        a.plot2 = self._empty_pw
+        name = self._yname or "xy"
+        a._curves = {(1, name): self.curve}
+        a._overlay_items = []
+        a._fft_enabled = {1: False, 2: False}
+        a._fft_log = {1: False, 2: False}
+        a._fft_curves = {}
+        a._fft_saved_data = {}
+        a._step_mode = False
+        a._cursors_enabled = bool(self.cursors_chk.isChecked())
+        a._cursor1_v = self._c1_v
+        a._cursor1_h = self._c1_h
+        a._cursor2_v = self._c2_v
+        a._cursor2_h = self._c2_h
+        a._cursors2_enabled = False
+        a._p2_cursor1_v = self._c1_v
+        a._p2_cursor1_h = self._c1_h
+        a._p2_cursor2_v = self._c2_v
+        a._p2_cursor2_h = self._c2_h
+        return a
+
+    def _print_pdf(self):
+        """Open the full Print-to-PDF settings dialog for this XY plot."""
+        if self._x is None or self._y is None:
+            QtWidgets.QMessageBox.information(self, "Print to PDF",
+                                              "Nothing to print yet.")
+            return
+        dlg = PrintPlotDialog(self._make_print_adapter(), self)
+        # Sensible defaults for an XY plot (the saved settings are tuned
+        # for time plots): axis labels from the selected variables and no
+        # relative-time shift of the X data.
+        try:
+            dlg.edit_xlabel.setText(self._xname)
+            dlg.edit_ylabel1.setText(self._yname)
+            dlg.chk_relative_time.setChecked(False)
+            dlg.combo_time_unit.blockSignals(True)
+            dlg.combo_time_unit.setCurrentIndex(0)
+            dlg.combo_time_unit.blockSignals(False)
+        except Exception:
+            pass
+        dlg.exec()
+
+
 # ----------------------- Main Window -----------------------
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -6182,6 +6529,10 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_print_pdf = QtWidgets.QPushButton("Print to PDF…")
         btn_print_pdf.clicked.connect(self._on_print_to_pdf)
         ctrl.addWidget(btn_print_pdf)
+        btn_plot_xy = QtWidgets.QPushButton("Plot XY")
+        btn_plot_xy.setToolTip("Plot one variable against another in a separate window\n(each click opens a new independent window)")
+        btn_plot_xy.clicked.connect(self._open_xy_plot)
+        ctrl.addWidget(btn_plot_xy)
         
         # CSV info display (list of loaded datasets with settings)
         self.csv_info_label = QtWidgets.QLabel("No CSV loaded")
@@ -8152,6 +8503,25 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         dlg = PrintPlotDialog(self.two_plot, self)
         dlg.exec()
+
+    def _open_xy_plot(self):
+        """Open a NEW independent XY plot window (multiple can be open)."""
+        if int(getattr(self, "dataset_count", 0)) == 0:
+            QtWidgets.QMessageBox.information(
+                self, "Plot XY", "Load a CSV first.")
+            return
+        if not hasattr(self, "_xy_windows"):
+            self._xy_windows = []
+        dlg = XYPlotDialog(self)
+        self._xy_windows.append(dlg)
+
+        def _forget(*_a, dlg_ref=dlg):
+            try:
+                self._xy_windows.remove(dlg_ref)
+            except (ValueError, RuntimeError):
+                pass
+        dlg.destroyed.connect(_forget)
+        dlg.show()
 
     # ---------------- Logging (shared port) ----------------
     def _toggle_logging(self):

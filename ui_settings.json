@@ -3,55 +3,41 @@
   "print_pdf": {
     "title1": "",
     "title2": "",
-    "xlabel": "Time (s)",
-    "ylabel1": "SPL (dB)",
+    "xlabel": "\u03c8_\u03b1",
+    "ylabel1": "\u03c8_\u03b2",
     "ylabel2": "Speed (RPM)",
     "use_visible": true,
     "custom_xrange": false,
     "xmin": 3.81056,
     "xmax": 3.81216,
-    "preview_ds": 5,
+    "preview_ds": 0,
     "yauto1": true,
     "ymin1": -30.0,
     "ymax1": 23.0,
     "yauto2": true,
     "ymin2": 0.0,
     "ymax2": 22.67,
-    "fig_width": 12.0,
+    "fig_width": 4.0,
     "fig_height": 4.0,
     "dpi": 300,
     "transparent": true,
     "grid": true,
     "minor_grid": false,
     "grid_alpha": 0.5,
-    "legend": true,
+    "legend": false,
     "legend_pos": "best",
     "fs_title": 12,
     "fs_label": 12,
     "fs_tick": 12,
     "fs_legend": 12,
-    "relative_time": true,
+    "relative_time": false,
     "time_unit": "s",
     "curve_overrides": {
-      "phi_e": {
-        "color": "#ffff33",
-        "linewidth": 1.5,
+      "1. psi_beta": {
+        "color": "#000000",
+        "linewidth": 1.0,
         "linestyle": "-",
-        "legend": "phi_e",
-        "plot_style": "line"
-      },
-      "pll_theta": {
-        "color": "#f781bf",
-        "linewidth": 1.5,
-        "linestyle": "-",
-        "legend": "pll_theta",
-        "plot_style": "line"
-      },
-      "motor_rpm": {
-        "color": "#984ea3",
-        "linewidth": 1.5,
-        "linestyle": "-",
-        "legend": "motor_rpm",
+        "legend": "1. psi_beta",
         "plot_style": "line"
       }
     },
@@ -70,7 +56,7 @@
   "graph_plot2_vars": [
     "psi_d_ac"
   ],
-  "last_pdf_dir": "C:/Users/alexa/Documents/sxoli/diplomatiki/latex_project/figures/chap7_pmsm/audio",
+  "last_pdf_dir": "C:/Users/alexa/Documents/sxoli/diplomatiki/latex_project/figures/chap7_pmsm/6th_harmonic",
   "rt_plot_vars": {
     "plot1": [
       "I2"
