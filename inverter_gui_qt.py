@@ -596,9 +596,9 @@ class DataLoggerQt:
 
     # ---------- lifecycle ----------
     def start(self, basename: str):
-        # Create per-date folder (e.g., 24_11_2025) under DATA_DIR
+        # Create per-date folder (e.g., 2025_11_24) under DATA_DIR
         try:
-            date_folder = datetime.now().strftime("%d_%m_%Y")
+            date_folder = datetime.now().strftime("%Y_%m_%d")
         except Exception:
             date_folder = "unknown_date"
         target_dir = os.path.join(self.DATA_DIR, date_folder)
@@ -1319,6 +1319,8 @@ class TwoWindowPlot(QtWidgets.QWidget):
         self._current_link_x = True
         self._current_downsample_factor = 1  # Track current downsample factor
         self._step_mode = False  # False = linear interp, 'right' = zero-order hold
+        self._pan_mode = False   # True: drag pans even while Zoom X/Y is active
+        self._zoom_axis = "none" # current axis-zoom mode: "x", "y" or "none"
 
         # ---- single, persistent layout ----
         self._vbox = QtWidgets.QVBoxLayout(self)
@@ -1836,8 +1838,14 @@ class TwoWindowPlot(QtWidgets.QWidget):
         self._update_xlink()
 
     def set_zoom_mode(self, mode: str):
+        self._zoom_axis = mode if mode in ("x", "y") else "none"
         vb1 = self.plot1.getViewBox()
         vb2 = self.plot2.getViewBox()
+        # Pan mode is independent of the axis lock: with pan ON, dragging
+        # pans (restricted to the selected axis); with pan OFF, dragging
+        # draws a rubber-band zoom on the selected axis.
+        axis_mouse_mode = (pg.ViewBox.PanMode if self._pan_mode
+                           else pg.ViewBox.RectMode)
         # Capture current ranges so switching modes preserves manual zoom
         vrs = []
         for vb in (vb1, vb2):
@@ -1845,7 +1853,7 @@ class TwoWindowPlot(QtWidgets.QWidget):
             vrs.append((tuple(xr), tuple(yr)))
         if mode == "x":
             for idx, vb in enumerate((vb1, vb2)):
-                vb.setMouseMode(pg.ViewBox.RectMode)
+                vb.setMouseMode(axis_mouse_mode)
                 # Freeze both axes to prevent autorange from resetting zoom
                 vb.disableAutoRange()  # both axes
                 xr, yr = vrs[idx]
@@ -1856,7 +1864,7 @@ class TwoWindowPlot(QtWidgets.QWidget):
                 vb.setMouseEnabled(x=True, y=False)
         elif mode == "y":
             for idx, vb in enumerate((vb1, vb2)):
-                vb.setMouseMode(pg.ViewBox.RectMode)
+                vb.setMouseMode(axis_mouse_mode)
                 # Freeze both axes to prevent autorange from resetting zoom
                 vb.disableAutoRange()  # both axes
                 xr, yr = vrs[idx]
@@ -1873,6 +1881,13 @@ class TwoWindowPlot(QtWidgets.QWidget):
                 vb.setYRange(yr[0], yr[1], padding=0)
                 vb.setMouseEnabled(x=True, y=True)
                 vb.setMouseMode(pg.ViewBox.PanMode)
+
+    def set_pan_mode(self, enabled: bool):
+        """Toggle drag-pans behaviour independently of the Zoom X/Y axis lock."""
+        self._pan_mode = bool(enabled)
+        # Re-apply the current mode with the new pan flag; ranges and the
+        # axis restriction are preserved by set_zoom_mode.
+        self.set_zoom_mode(self._zoom_axis)
 
     def zoom_fit(self):
         """Reset both plots to show all data (not cumulative unzoom)."""
@@ -1911,14 +1926,37 @@ class TwoWindowPlot(QtWidgets.QWidget):
                     else:
                         ymin = k
                         ymax = 0.0
-                vb.setRange(xRange=(xmin, xmax), yRange=(ymin, ymax), padding=0.05)
+                # 3) refresh this plot's limits from ITS OWN data.
+                # _do_plot() used to install limits computed from the union of
+                # BOTH plots' channels on BOTH viewboxes, and stale
+                # maxXRange/maxYRange caps from a previous CSV load survive
+                # setLimits() calls that don't mention them. Either can clamp
+                # or shift the range we are about to set. Reset them here so
+                # Fit View is always per-plot correct.
+                x_pad = 0.05 * (xmax - xmin)
+                y_pad = 0.05 * (ymax - ymin)
+                try:
+                    vb.setLimits(
+                        xMin=xmin - x_pad, xMax=xmax + x_pad,
+                        yMin=ymin - y_pad, yMax=ymax + y_pad,
+                        minXRange=max(1e-9, (xmax - xmin) * 1e-9),
+                        minYRange=max(1e-9, (ymax - ymin) * 1e-6),
+                        maxXRange=None, maxYRange=None,
+                    )
+                except Exception:
+                    pass
+                # X: exact data span (no padding); Y: keep 5% headroom
+                vb.setXRange(xmin, xmax, padding=0)
+                vb.setYRange(ymin, ymax, padding=0.05)
             else:
                 # No data: default to a symmetric range around 0 to keep 0 visible
                 vb.setRange(yRange=(-1.0, 1.0), padding=0.05)
             # Re-enable both axes for normal zoom
             vb.setMouseEnabled(x=True, y=True)
-            # 3) re-enable autorange for next user zooms
-            vb.enableAutoRange(axis=pg.ViewBox.XYAxes)
+            # NOTE: deliberately NOT re-enabling auto-range here. It fires on
+            # the next repaint (after this handler returns) and, with the two
+            # plots X-linked, overrides the fitted ranges — the caller
+            # (set_zoom_mode) manages auto-range state instead.
 
     def refit_limits_to_all_data(self):
         """Recompute x/y limits and view ranges from ALL items (base + overlays)."""
@@ -1962,18 +2000,27 @@ class TwoWindowPlot(QtWidgets.QWidget):
                     min_x_range = max(1e-9, (xmax - xmin) * 1e-9)
                     y_span = max(1e-6, (ymax - ymin))
                     min_y_range = max(1e-6, y_span * 1e-6)
+                    # Pad limits so the padded setRange() below isn't clipped,
+                    # and explicitly clear maxXRange/maxYRange: setLimits()
+                    # keeps keys it isn't given, so the caps installed by
+                    # _do_plot() for the FIRST CSV would otherwise keep
+                    # clamping the view span after longer overlays are added.
+                    x_pad = 0.05 * (xmax - xmin)
+                    y_pad = 0.05 * (ymax - ymin)
                     vb.setLimits(
-                        xMin=xmin, xMax=xmax,
-                        yMin=ymin, yMax=ymax,
+                        xMin=xmin - x_pad, xMax=xmax + x_pad,
+                        yMin=ymin - y_pad, yMax=ymax + y_pad,
                         minXRange=min_x_range,
-                        minYRange=min_y_range
+                        minYRange=min_y_range,
+                        maxXRange=None, maxYRange=None,
                     )
                 except Exception:
                     pass
                 # Show full extent now
                 vb.disableAutoRange()
-                vb.setRange(xRange=(xmin, xmax), yRange=(ymin, ymax), padding=0.05)
-                vb.enableAutoRange(axis=pg.ViewBox.XYAxes)
+                # X: exact data span (no padding); Y: keep 5% headroom
+                vb.setXRange(xmin, xmax, padding=0)
+                vb.setYRange(ymin, ymax, padding=0.05)
         except Exception:
             pass
 
@@ -1989,9 +2036,14 @@ class TwoWindowPlot(QtWidgets.QWidget):
             self._fft_saved_data.pop(win_id, None)
             self._fft_time_range.pop(win_id, None)
         # Remove only data curves and overlays; preserve decorations (cursors, zero lines, legends)
-        for curve in list(self._curves.values()):
+        # IMPORTANT: remove via the PlotWidget (PlotItem), NOT the ViewBox.
+        # ViewBox.removeItem() detaches the curve from the scene but leaves
+        # it registered in PlotItem.dataItems, so listDataItems() kept
+        # returning ghost curves with the OLD file's data — every fit/refit
+        # then computed ranges over the union of old and new data.
+        for (win_id, name), curve in list(self._curves.items()):
             try:
-                curve.getViewBox().removeItem(curve)
+                (self.plot1 if win_id == 1 else self.plot2).removeItem(curve)
             except Exception:
                 pass
         self._curves.clear()
@@ -2099,6 +2151,14 @@ class TwoWindowPlot(QtWidgets.QWidget):
         if not needed_channels:
             raise ValueError("No channels selected for plotting.")
         
+        # A "fresh" CSV (different file, or nothing plotted yet — e.g. after
+        # Clear plots) must re-fit the X axis to its own time span when the
+        # data lands in _do_plot. A variable/downsample change on the SAME
+        # file must instead preserve the current X view.
+        self._fit_x_on_plot = (csv_path != getattr(self, "_last_plotted_csv_path", None)
+                               or not self._curves)
+        self._last_plotted_csv_path = csv_path
+
         # Store current plot params for zoom reload
         self._current_csv_path = csv_path
         self._current_groups1 = groups1
@@ -2366,27 +2426,38 @@ class TwoWindowPlot(QtWidgets.QWidget):
                 max_range = max(1.0, x_max - x_min)
                 # Allow zooming down to one-sample width (in seconds if time-scaled)
                 min_x_range = max(1e-9, float(downsample_factor) * float(getattr(self, "_sec_per_sample", 1.0)))
-                # Compute y-limits from the columns we are about to plot
-                used_names = {name for (_wid, name) in self._curves.keys()} & set(df.columns)
-                if used_names:
-                    # Stack selected columns to compute finite min/max efficiently
-                    y_data = df[list(used_names)].to_numpy(dtype=np.float32, copy=False)
-                    # Convert non-finite to NaN, then compute nanmin/nanmax safely
-                    y_min = float(np.nanmin(y_data)) if np.isfinite(y_data).any() else 0.0
-                    y_max = float(np.nanmax(y_data)) if np.isfinite(y_data).any() else 1.0
-                    if not np.isfinite(y_min):
-                        y_min = 0.0
-                    if not np.isfinite(y_max):
-                        y_max = 1.0
-                    if y_max == y_min:
-                        y_max = y_min + 1.0
-                    y_range = max(1e-6, y_max - y_min)
-                    min_y_range = max(1e-6, y_range * 1e-6)
-                    max_y_range = max(y_range, 1.0) * 1000.0
-                else:
-                    y_min, y_max = 0.0, 1.0
-                    min_y_range, max_y_range = 1e-6, 1.0
-                for vb in (self.plot1.getViewBox(), self.plot2.getViewBox()):
+                # Compute y-limits PER PLOT from the columns plotted in THAT
+                # window. Previously the union of both windows' channels was
+                # used for both viewboxes, so a 0..100 signal in plot1 set
+                # plot2's y-limits to 0..100 as well, coupling their ranges.
+                def _y_bounds_for_window(win_id):
+                    names = {name for (wid, name) in self._curves.keys()
+                             if wid == win_id} & set(df.columns)
+                    if not names:
+                        return None
+                    y_data = df[list(names)].to_numpy(dtype=np.float32, copy=False)
+                    if not np.isfinite(y_data).any():
+                        return None
+                    lo = float(np.nanmin(y_data))
+                    hi = float(np.nanmax(y_data))
+                    if not np.isfinite(lo):
+                        lo = 0.0
+                    if not np.isfinite(hi):
+                        hi = 1.0
+                    return lo, hi
+                for vb, win_id in ((self.plot1.getViewBox(), 1),
+                                   (self.plot2.getViewBox(), 2)):
+                    bounds = _y_bounds_for_window(win_id)
+                    if bounds is not None:
+                        y_min, y_max = bounds
+                        if y_max == y_min:
+                            y_max = y_min + 1.0
+                        y_range = max(1e-6, y_max - y_min)
+                        min_y_range = max(1e-6, y_range * 1e-6)
+                        max_y_range = max(y_range, 1.0) * 1000.0
+                    else:
+                        y_min, y_max = 0.0, 1.0
+                        min_y_range, max_y_range = 1e-6, 1.0
                     vb.setLimits(
                         xMin=x_min, xMax=x_max, minXRange=min_x_range, maxXRange=max_range,
                         yMin=y_min, yMax=y_max, minYRange=min_y_range, maxYRange=max_y_range
@@ -2433,6 +2504,59 @@ class TwoWindowPlot(QtWidgets.QWidget):
             
             # Final processEvents to ensure all updates are rendered
             QtWidgets.QApplication.processEvents()
+            # Re-fit each plot's Y axis to the data now displayed, keeping the
+            # X view. Auto-range is intentionally left disabled after Fit View
+            # / manual zoom, so without this the y-range of the PREVIOUS
+            # channel selection would persist when variables change (the
+            # selection-change refit runs before this background load lands).
+            # For a FRESH file (see plot_csv) the X axis is re-fitted too,
+            # so a shorter recording doesn't keep the old file's time span.
+            fit_x = bool(getattr(self, "_fit_x_on_plot", False))
+            self._fit_x_on_plot = False
+            try:
+                for plotw, win_id in ((self.plot1, 1), (self.plot2, 2)):
+                    if self._fft_enabled.get(win_id):
+                        continue  # FFT sets its own range below
+                    vb = plotw.getViewBox()
+                    try:
+                        if any(vb.autoRangeEnabled()):
+                            continue  # initial load: autorange handles it
+                    except Exception:
+                        pass
+                    if fit_x and len(x_full) > 0:
+                        vb.setXRange(float(x_full[0]), float(x_full[-1]), padding=0)
+                    ymins, ymaxs = [], []
+                    for item in plotw.listDataItems():
+                        yv = getattr(item, "yData", None)
+                        if yv is None or len(yv) == 0:
+                            continue
+                        lo = np.nanmin(yv)
+                        hi = np.nanmax(yv)
+                        if np.isfinite(lo) and np.isfinite(hi):
+                            ymins.append(float(lo))
+                            ymaxs.append(float(hi))
+                    if not ymins:
+                        continue
+                    ymin, ymax = min(ymins), max(ymaxs)
+                    # Same conventions as zoom_fit: always include 0
+                    if ymin > 0.0:
+                        ymin = 0.0
+                    if ymax < 0.0:
+                        ymax = 0.0
+                    if ymax == ymin:
+                        if ymax >= 0.0:
+                            ymin, ymax = 0.0, (1.0 if ymax == 0.0 else ymax)
+                        else:
+                            ymin, ymax = ymax, 0.0
+                    y_pad = 0.05 * (ymax - ymin)
+                    try:
+                        vb.setLimits(yMin=ymin - y_pad, yMax=ymax + y_pad,
+                                     maxYRange=None)
+                    except Exception:
+                        pass
+                    vb.setYRange(ymin, ymax, padding=0.05)
+            except Exception:
+                pass
             # After plotting, ensure cursors/zero-lines are present and positioned sensibly
             try:
                 # Keep zero lines on top
@@ -6220,6 +6344,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.graph_zoomy_btn.clicked.connect(self._on_graph_zoomy_clicked)
         self.graph_fit_btn.clicked.connect(self._on_graph_fit_clicked)
         self.graph_pan_chk.toggled.connect(self._on_graph_pan_toggled)
+        # The checkbox was setChecked(True) before this connect, so push the
+        # initial pan state to the plot widget explicitly.
+        self.two_plot.set_pan_mode(self.graph_pan_chk.isChecked())
         # Wire cursor updates to label
         try:
             self.two_plot.cursorMoved.connect(self._update_cursor_info_label)
@@ -6239,22 +6366,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(w, "Graph")
 
     def _on_graph_pan_toggled(self, checked: bool):
-        if checked:
-            self.graph_zoomx_btn.setChecked(False)
-            self.graph_zoomy_btn.setChecked(False)
-            self.two_plot.set_zoom_mode("none")
+        # Pan works independently of Zoom X/Y: it only switches drag
+        # behaviour (pan vs rubber-band zoom); the axis lock is kept.
+        self.two_plot.set_pan_mode(checked)
 
     def _on_graph_zoomx_clicked(self, checked: bool):
-        if self.graph_pan_chk.isChecked():
-            self.graph_zoomx_btn.setChecked(False)
-            return
         self.graph_zoomy_btn.setChecked(False)
         self.two_plot.set_zoom_mode("x" if checked else "none")
 
     def _on_graph_zoomy_clicked(self, checked: bool):
-        if self.graph_pan_chk.isChecked():
-            self.graph_zoomy_btn.setChecked(False)
-            return
         self.graph_zoomx_btn.setChecked(False)
         self.two_plot.set_zoom_mode("y" if checked else "none")
 
@@ -6650,6 +6770,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 _ts_div2 = _sf2(settings_dict.get("data_logger_ts_div"))
                 _fs_trq2 = _sf2(settings_dict.get("Fs_trq"))
                 if not (_ts_div2 and _ts_div2 > 0 and _fs_trq2 and _fs_trq2 > 0):
+                    # Default to the last known sample time (e.g. the one
+                    # entered for the base CSV) instead of 1.0 s/sample.
+                    # With the old "1.0" default, accepting or cancelling
+                    # this dialog made a few-second recording span
+                    # thousands of "seconds" on the x-axis.
+                    _prev_sec2 = getattr(self, "current_csv_manual_sample_time", None)
+                    if not _prev_sec2:
+                        for _k in sorted(self.dataset_manual_sample_time_by_id):
+                            _v = self.dataset_manual_sample_time_by_id[_k]
+                            if _v and _v > 0:
+                                _prev_sec2 = _v
+                    if not _prev_sec2 or _prev_sec2 <= 0:
+                        _prev_sec2 = 1.0
                     _raw2, _ok2 = QtWidgets.QInputDialog.getText(
                         self,
                         "Sampling Time Unknown",
@@ -6657,9 +6790,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         "Enter the sampling time per sample (seconds).\n"
                         "Accepts decimals (0.000125), fractions (1/16000), or sci notation (62.5e-6):",
                         QtWidgets.QLineEdit.Normal,
-                        "1.0",
+                        f"{_prev_sec2:g}",
                     )
-                    _user_sec2 = 1.0
+                    _user_sec2 = _prev_sec2
                     if _ok2 and _raw2.strip():
                         try:
                             if '/' in _raw2:
@@ -6672,9 +6805,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         except Exception:
                             QtWidgets.QMessageBox.warning(
                                 self, "Invalid Input",
-                                f"Could not parse '{_raw2}' as a sampling time.\nFalling back to 1 sample = 1 unit."
+                                f"Could not parse '{_raw2}' as a sampling time.\nFalling back to {_prev_sec2:g} s/sample."
                             )
-                            _user_sec2 = 1.0
+                            _user_sec2 = _prev_sec2
                     self.dataset_manual_sample_time_by_id[ds_id] = _user_sec2
                 # Append items to selectors with prefix
                 prefixed = [f"{ds_id}. {c}" for c in channel_cols]
@@ -6982,6 +7115,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_csv_channels_changed(self):
         """Called when channel selection changes in CSV plot combos."""
+        # Preserve the current X view across a variable change: the overlay
+        # refresh below refits limits to the full data extent, which used to
+        # reset any X zoom whenever the plotted channels changed. Only do
+        # this when data is already displayed and the user has fitted or
+        # zoomed (auto-range off) — the initial load must still fit X.
+        saved_x = None
+        try:
+            vb1 = self.two_plot.plot1.getViewBox()
+            has_items = bool(self.two_plot.plot1.listDataItems()
+                             or self.two_plot.plot2.listDataItems())
+            if has_items and not any(vb1.autoRangeEnabled()):
+                saved_x = (
+                    tuple(vb1.viewRange()[0]),
+                    tuple(self.two_plot.plot2.getViewBox().viewRange()[0]),
+                )
+        except Exception:
+            saved_x = None
         if self.current_csv_path:
             self._plot_csv_path(self.current_csv_path)
         # Update cursor tracking combos after channels change
@@ -6994,6 +7144,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_overlays_from_selection()
         except Exception:
             pass
+        # Restore the X view captured above (refit reset it to full extent)
+        if saved_x is not None:
+            try:
+                self.two_plot.plot1.getViewBox().setXRange(*saved_x[0], padding=0)
+                self.two_plot.plot2.getViewBox().setXRange(*saved_x[1], padding=0)
+            except Exception:
+                pass
         # Persist current selection (bare names, no dataset prefix)
         try:
             def _bare(items):
@@ -7539,7 +7696,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if tsf and tsf > 0 and fsf and fsf > 0:
                 sec_per_sample = tsf / (fsf * 1000.0)
             else:
-                sec_per_sample = float(self.dataset_manual_sample_time_by_id.get(ds_id, 1.0))
+                # Fall back to the base CSV's manual sample time before
+                # assuming 1 s/sample (which stretches a few-second file
+                # to thousands of seconds on the x-axis).
+                _fallback_sec = (self.dataset_manual_sample_time_by_id.get(ds_id)
+                                 or getattr(self, "current_csv_manual_sample_time", None)
+                                 or 1.0)
+                sec_per_sample = float(_fallback_sec)
             # Load only requested columns
             import pandas as pd
             try:

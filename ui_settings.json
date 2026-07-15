@@ -1,16 +1,16 @@
 {
-  "last_csv_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap7_pmsm",
+  "last_csv_dir": "C:/Users/alexa/Documents/sxoli/diplomatiki/python_scripts/6th_harmonic",
   "print_pdf": {
     "title1": "",
     "title2": "",
-    "xlabel": "Time (ms)",
-    "ylabel1": "Phase Current (A)",
+    "xlabel": "Time (s)",
+    "ylabel1": "SPL (dB)",
     "ylabel2": "Speed (RPM)",
     "use_visible": true,
-    "custom_xrange": true,
+    "custom_xrange": false,
     "xmin": 3.81056,
     "xmax": 3.81216,
-    "preview_ds": 1,
+    "preview_ds": 5,
     "yauto1": true,
     "ymin1": -30.0,
     "ymax1": 23.0,
@@ -24,25 +24,32 @@
     "grid": true,
     "minor_grid": false,
     "grid_alpha": 0.5,
-    "legend": false,
+    "legend": true,
     "legend_pos": "best",
     "fs_title": 12,
     "fs_label": 12,
     "fs_tick": 12,
     "fs_legend": 12,
     "relative_time": true,
-    "time_unit": "ms",
+    "time_unit": "s",
     "curve_overrides": {
-      "I1": {
-        "color": "#ff0000",
-        "linewidth": 1.0,
+      "phi_e": {
+        "color": "#ffff33",
+        "linewidth": 1.5,
         "linestyle": "-",
-        "legend": "I1",
+        "legend": "phi_e",
+        "plot_style": "line"
+      },
+      "pll_theta": {
+        "color": "#f781bf",
+        "linewidth": 1.5,
+        "linestyle": "-",
+        "legend": "pll_theta",
         "plot_style": "line"
       },
       "motor_rpm": {
-        "color": "#ff0000",
-        "linewidth": 1.0,
+        "color": "#984ea3",
+        "linewidth": 1.5,
         "linestyle": "-",
         "legend": "motor_rpm",
         "plot_style": "line"
@@ -58,12 +65,12 @@
     "cursor_p2_show_y": false
   },
   "graph_plot1_vars": [
-    "I1"
+    "psi_q_ac"
   ],
   "graph_plot2_vars": [
-    "motor_rpm"
+    "psi_d_ac"
   ],
-  "last_pdf_dir": "C:/Users/alex/Documents/sxoli/diplomatiki/latex_project/figures/chap7_pmsm/sampled_currents",
+  "last_pdf_dir": "C:/Users/alexa/Documents/sxoli/diplomatiki/latex_project/figures/chap7_pmsm/audio",
   "rt_plot_vars": {
     "plot1": [
       "I2"
